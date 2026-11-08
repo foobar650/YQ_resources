@@ -81,6 +81,8 @@
   .game-panel { display: none; flex-direction: column; gap: 12px; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px; }
   .game-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .game-title { font-size: 15px; font-weight: 600; color: #e6edf3; }
+  .game-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
   .role {
     font-size: 12px; padding: 3px 12px; border-radius: 999px; background: #21262d; color: #8b949e; white-space: nowrap;
   }
@@ -200,8 +202,11 @@
   <section id="gameShell" class="game-panel">
     <div class="game-top">
       <span class="game-title" id="gameTitle">—</span>
-      <span class="role" id="gameStatus">—</span>
-      <button id="btnGameHangup" class="danger" type="button">断开连接</button>
+      <div class="game-actions">
+        <span class="role" id="gameStatus">—</span>
+        <button id="btnBackToSelect" class="copy" type="button">← 返回选择</button>
+        <button id="btnGameHangup" class="danger" type="button">断开连接</button>
+      </div>
     </div>
     <div id="gameBody"></div>
     <div class="game-foot">
@@ -239,6 +244,7 @@
   var gameBody     = document.getElementById('gameBody');
   var btnHangupSelect = document.getElementById('btnHangupSelect');
   var btnGameHangup   = document.getElementById('btnGameHangup');
+  var btnBackToSelect = document.getElementById('btnBackToSelect');
 
   var shaPanel    = document.getElementById('shaPanel');
   var shaStatus   = document.getElementById('shaStatus');
@@ -375,11 +381,6 @@
     try { localStorage.removeItem(LS_SHA_KEY); } catch (e) { /* 忽略 */ }
   }
 
-  /* ============================================================
-   * SHA 面板显示 / 隐藏
-   *   mode: 'manual'        全部失败，需要用户输入
-   *   mode: 'stale-local'   使用本地 SHA 兜底，但可能过时
-   * ============================================================ */
   function showShaPanel(mode, currentSha, message) {
     shaPanel.style.display = 'block';
     shaError.textContent = '';
@@ -477,17 +478,12 @@
 
   /* ============================================================
    * 启动流程
-   *   1. 先请求 GitHub API 拿最新 SHA（保证不会静默用旧 SHA）
-   *   2. API 成功 → 用最新 SHA 加载 → 同步 localStorage
-   *   3. API 失败或新 SHA 加载失败 → 回退到本地 SHA，但显示面板警告
-   *   4. 全部失败 → 显示面板等待手动输入
    * ============================================================ */
   async function bootstrap() {
     var saved = getSavedSha();
     var apiSha = null;
     var apiError = null;
 
-    // 第 1 步：尝试获取最新 SHA
     try {
       apiSha = await getLatestCommitSha();
       log('获取最新 commit SHA：' + apiSha.slice(0, 7) + '…', 'sys');
@@ -496,7 +492,6 @@
       log('获取 commit SHA 失败：' + e.message + '（可能是网络或环境限制）', 'err');
     }
 
-    // 第 2 步：有最新 SHA 时优先使用
     if (apiSha) {
       if (saved && saved !== apiSha) {
         log('本地保存的 SHA (' + saved.slice(0, 7) + '…) 不是最新版本，改用最新 SHA', 'sys');
@@ -513,12 +508,10 @@
       log('最新 SHA 加载失败（CDN 可能未同步），尝试回退到本地保存的 SHA…', 'err');
     }
 
-    // 第 3 步：回退到本地 SHA
     if (saved) {
       log('使用本地保存的 SHA：' + saved.slice(0, 7) + '…（可能已过时）', 'sys');
       var okLocal = await loadAllScripts(saved);
       if (okLocal) {
-        // 【关键】即使用本地 SHA 加载成功，也显示面板警告，避免用户不知情用过时版本
         var msg;
         if (apiSha) {
           msg = '⚠️ <b>最新 SHA 加载失败</b>（CDN 可能未同步），<br>'
@@ -536,7 +529,6 @@
       log('本地 SHA 加载失败（可能是 CDN 未同步或 SHA 已失效）', 'err');
     }
 
-    // 第 4 步：全部失败
     var failMsg = '❌ <b>无法加载游戏</b>。';
     if (apiError) failMsg += '获取最新 SHA 失败：' + apiError.message + '。';
     if (saved) failMsg += '本地保存的 SHA 也加载失败。';
@@ -726,11 +718,42 @@
   }
 
   /* ============================================================
+   * 退出当前游戏，回到选择界面
+   *   notifyPeer=true 时通过数据通道通知对方一起退出
+   * ============================================================ */
+  function leaveGame(notifyPeer) {
+    if (!activeController) return;
+
+    if (notifyPeer && dc && dc.readyState === 'open') {
+      try { dc.send(JSON.stringify({ t: 'leave-game' })); }
+      catch (e) { /* 忽略 */ }
+    }
+
+    stopGame();
+
+    if (dc && dc.readyState === 'open') {
+      showGameSelect();
+    } else {
+      backToSignal();
+    }
+  }
+
+  /* ============================================================
    * 消息路由
    * ============================================================ */
   function routeMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
 
+    // 对方在游戏界面点击「返回选择」
+    if (msg.t === 'leave-game') {
+      if (activeController) {
+        log('对方已退出游戏，返回游戏选择界面', 'sys');
+        leaveGame(false);
+      }
+      return;
+    }
+
+    // 游戏选择：未开局时响应
     if (msg.t === 'select') {
       if (!activeController) {
         log('对方选择了游戏：' + msg.game, 'sys');
@@ -739,6 +762,7 @@
       return;
     }
 
+    // 游戏内消息：只转发给当前游戏
     if (activeController) {
       try { activeController.handleMessage(msg); }
       catch (e) { log('游戏消息处理异常：' + e.message, 'err'); }
@@ -1024,6 +1048,21 @@
 
   btnCopyOffer.addEventListener('click', function () { copyToClipboard(offerOut.value, btnCopyOffer, 'Offer'); });
   btnCopyAnswer.addEventListener('click', function () { copyToClipboard(answerOut.value, btnCopyAnswer, 'Answer'); });
+
+  /* ============================================================
+   * 返回游戏选择
+   * ============================================================ */
+  btnBackToSelect.addEventListener('click', function () {
+    if (!activeController) return;
+
+    var ok = window.confirm(
+      '确定要返回游戏选择界面吗？\n当前对局将被放弃，对方也会一起返回选择界面。'
+    );
+    if (!ok) return;
+
+    log('用户主动返回游戏选择界面', 'sys');
+    leaveGame(true);
+  });
 
   /* ============================================================
    * 断开
