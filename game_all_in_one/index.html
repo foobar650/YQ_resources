@@ -183,7 +183,7 @@
   /* ============================================================
    * 配置：改仓库/分支只动这里
    * ============================================================ */
-  var CDN_BASE = 'https://cdn.jsdmirror.com/gh/foobar650/YQ_resources@master/game_all_in_one/';
+var CDN_BASE = 'https://cdn.jsdmirror.com/gh/foobar650/YQ_resources@<commit-hash>/game_all_in_one/';
 
   /* ============================================================
    * DOM
@@ -254,6 +254,7 @@
     order: [],
     register: function (id, def) {
       if (this.games[id]) return;
+      def.id=id;
       this.games[id] = def;
       this.order.push(id);
     },
