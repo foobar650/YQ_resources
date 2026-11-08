@@ -1,958 +1,1062 @@
-/**
- * 海战棋模块
- * 依赖 window.GameRegistry（由 index.html 提供）
- *
- * 消息协议：
- *   bs:config   { ships:[{len,count}] }   主机广播舰队配置
- *   bs:ready    {}                         一方部署完成
- *   bs:start    { firstTurn:'host'|'guest' } 主机宣布开局与先手
- *   bs:attack   { x,y }                    攻击方发起炮击
- *   bs:result   { x,y,hit,sunk,gameOver,nextTurn } 被攻击方回执
- */
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebRTC 手动信令 · 跨设备 P2P 游戏</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: #0d1117; color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px; line-height: 1.6;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .topbar h1 { font-size: 17px; margin: 0; font-weight: 600; color: #e6edf3; }
+  .badge { padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .5px; white-space: nowrap; }
+  .badge.off { background: #3d1418; color: #f85149; border: 1px solid #f85149; }
+  .badge.on  { background: #0f2f16; color: #3fb950; border: 1px solid #3fb950; }
+
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .card h2 { font-size: 14px; margin: 0 0 10px; color: #58a6ff; font-weight: 600; }
+  .hint { font-size: 12px; color: #8b949e; margin: 8px 0 0; }
+  .hint.warn { color: #d29922; }
+  .hint code {
+    background: #21262d; padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: #e6edf3;
+  }
+
+  textarea {
+    width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
+    padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px; line-height: 1.45; resize: vertical; margin: 8px 0; word-break: break-all;
+  }
+  textarea:focus { outline: none; border-color: #58a6ff; }
+
+  button {
+    background: #238636; color: #fff; border: 1px solid #2ea043; padding: 7px 16px; border-radius: 6px;
+    cursor: pointer; font-size: 13px; font-family: inherit; transition: filter .12s ease;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.18); }
+  button:active:not(:disabled) { filter: brightness(.9); }
+  button:disabled { background: #21262d; border-color: #30363d; color: #6e7681; cursor: not-allowed; }
+  button.copy { background: #1f6feb; border-color: #388bfd; }
+  button.danger { background: #4a1d20; border-color: #f85149; color: #ff7b72; }
+
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .stat { font-size: 12px; color: #8b949e; font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+
+  #log {
+    background: #010409; border: 1px solid #30363d; border-radius: 6px; height: 280px; overflow-y: auto;
+    padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px; line-height: 1.55;
+  }
+  .log-line { white-space: pre-wrap; word-break: break-word; }
+  .log-line .ts { color: #6e7681; margin-right: 6px; }
+  .log-send .msg { color: #4da3ff; }
+  .log-recv .msg { color: #3fb950; }
+  .log-sys  .msg { color: #d29922; }
+  .log-err  .msg { color: #f85149; }
+  .log-info .msg { color: #8b949e; }
+
+  .select-panel { display: none; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; }
+  .select-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .select-title { font-size: 15px; font-weight: 600; color: #e6edf3; }
+  .select-hint { font-size: 12px; color: #8b949e; margin: 10px 0 16px; }
+  .game-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+  .game-card {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left;
+    background: #0d1117; border: 1px solid #30363d; border-radius: 10px; padding: 16px;
+    color: #e6edf3; cursor: pointer; font-family: inherit; font-size: 14px;
+    transition: border-color .15s ease, transform .12s ease, background .15s ease;
+  }
+  .game-card:hover:not(:disabled) { border-color: #58a6ff; background: #101722; transform: translateY(-2px); filter: none; }
+  .game-card:active:not(:disabled) { transform: translateY(0); }
+  .game-card-icon { font-size: 26px; line-height: 1; }
+  .game-card-name { font-size: 15px; font-weight: 600; }
+  .game-card-desc { font-size: 12px; color: #8b949e; font-weight: 400; }
+
+  .game-panel { display: none; flex-direction: column; gap: 12px; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px; }
+  .game-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .game-title { font-size: 15px; font-weight: 600; color: #e6edf3; }
+  .role {
+    font-size: 12px; padding: 3px 12px; border-radius: 999px; background: #21262d; color: #8b949e; white-space: nowrap;
+  }
+  .role.host  { background: #0d2340; color: #58a6ff; border: 1px solid #1f6feb; }
+  .role.guest { background: #0f2f16; color: #3fb950; border: 1px solid #2ea043; }
+  .role.turn  { background: #1f6feb; color: #fff; border: 1px solid #388bfd; }
+  .role.wait  { background: #3d2e0a; color: #d29922; border: 1px solid #bb8009; }
+  .role.over  { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+
+  .game-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: #8b949e; }
+
+  .game-canvas {
+    display: block; width: 100%; height: auto; background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  .pong-canvas { aspect-ratio: 8 / 5; cursor: crosshair; }
+  .bs-canvas   { aspect-ratio: 800 / 820; cursor: pointer; }
+
+  .bs-subpanel { display: none; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 14px; }
+  .bs-subpanel h3 { margin: 0 0 8px; font-size: 14px; color: #58a6ff; font-weight: 600; }
+  .bs-subpanel p { margin: 0 0 8px; }
+  .bs-config-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: #8b949e; flex-wrap: wrap; }
+  .bs-input {
+    width: 68px; background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 5px;
+    padding: 5px 8px; font-size: 13px; font-family: inherit;
+  }
+  .bs-input:focus { outline: none; border-color: #58a6ff; }
+
+  #shaInput {
+    width: 100%; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+    padding: 9px 12px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; margin: 8px 0;
+  }
+  #shaInput:focus { outline: none; border-color: #58a6ff; }
+
+  #shaStatus {
+    font-size: 13px; line-height: 1.65; margin: 0 0 6px; color: #8b949e;
+    padding: 10px 12px; background: #0d1117; border-radius: 6px; border-left: 3px solid #30363d;
+  }
+  #shaStatus.stale { color: #d29922; border-left-color: #d29922; background: #2d2208; }
+  #shaStatus.fail  { color: #f85149; border-left-color: #f85149; background: #2d0f12; }
+  #shaStatus code {
+    background: rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: inherit;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <h1>WebRTC 手动信令 · 跨设备 P2P 游戏</h1>
+    <span id="statusBadge" class="badge off">未连接</span>
+  </div>
+
+  <!-- ================= SHA 面板 ================= -->
+  <section id="shaPanel" class="card" style="display:none;">
+    <h2>Commit SHA</h2>
+    <p id="shaStatus">请输入最新的 40 位 commit SHA。</p>
+    <input id="shaInput" type="text" placeholder="例如：a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0">
+    <div class="row">
+      <button id="btnShaSave" type="button">保存并使用</button>
+      <button id="btnShaRetry" class="copy" type="button">重新尝试自动获取</button>
+      <button id="btnShaClear" class="danger" type="button">清除已保存的 SHA</button>
+    </div>
+    <p id="shaError" class="hint warn"></p>
+    <p class="hint">SHA 会写入浏览器 localStorage，下次自动获取失败时会用它兜底。</p>
+  </section>
+
+  <!-- 信令区 -->
+  <div id="signalArea">
+    <section class="card">
+      <h2>① 发起方：生成 Offer</h2>
+      <button id="btnCreateOffer" type="button">生成 Offer</button>
+      <textarea id="offerOut" rows="6" readonly placeholder="点击「生成 Offer」后，等 ICE 收集完成才会填充到这里…"></textarea>
+      <div class="row">
+        <button id="btnCopyOffer" class="copy" type="button">复制 Offer</button>
+        <span id="offerStat" class="stat">字符数 0 ｜ 候选 0</span>
+      </div>
+      <p class="hint">完整 SDP 约 1~3KB 属于正常体积，请整段复制，不要裁剪。</p>
+    </section>
+
+    <section class="card">
+      <h2>② 应答方：粘贴 Offer 并生成 Answer</h2>
+      <textarea id="offerIn" rows="6" placeholder="把发起方发来的完整 Offer JSON 粘贴到这里…"></textarea>
+      <button id="btnCreateAnswer" type="button">生成 Answer</button>
+      <textarea id="answerOut" rows="6" readonly placeholder="生成后，等 ICE 收集完成才会填充到这里…"></textarea>
+      <div class="row">
+        <button id="btnCopyAnswer" class="copy" type="button">复制 Answer</button>
+        <span id="answerStat" class="stat">字符数 0 ｜ 候选 0</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>③ 发起方：粘贴 Answer 并完成连接</h2>
+      <textarea id="answerIn" rows="6" placeholder="把应答方发回的完整 Answer JSON 粘贴到这里…"></textarea>
+      <button id="btnApplyAnswer" type="button">应用 Answer</button>
+      <p class="hint warn">收到 Answer 后应尽快粘贴应用，避免 ICE 凭据过期。</p>
+    </section>
+
+    <section class="card">
+      <h2>④ 数据通道日志</h2>
+      <div id="log"></div>
+    </section>
+  </div>
+
+  <!-- 游戏选择 -->
+  <section id="gameSelectArea" class="select-panel">
+    <div class="select-top">
+      <span class="select-title">🎮 选择游戏</span>
+      <button id="btnHangupSelect" class="danger" type="button">断开连接</button>
+    </div>
+    <p class="select-hint">选择后对方会自动加入同一游戏。发起方为主机，应答方为客机。</p>
+    <div id="gameGrid" class="game-grid"></div>
+  </section>
+
+  <!-- 游戏外壳 -->
+  <section id="gameShell" class="game-panel">
+    <div class="game-top">
+      <span class="game-title" id="gameTitle">—</span>
+      <span class="role" id="gameStatus">—</span>
+      <button id="btnGameHangup" class="danger" type="button">断开连接</button>
+    </div>
+    <div id="gameBody"></div>
+    <div class="game-foot">
+      <span id="gameHint">—</span>
+    </div>
+  </section>
+
+</div>
+
+<script>
 (function () {
   'use strict';
 
-  if (!window.GameRegistry) {
-    console.error('[battleship] GameRegistry 未定义，跳过注册');
-    return;
+  /* ============================================================
+   * 配置：改仓库/分支只动这里
+   * ============================================================ */
+  var REPO_OWNER  = 'foobar650';
+  var REPO_NAME   = 'YQ_resources';
+  var REPO_BRANCH = 'master';
+  var REPO_PATH   = 'game_all_in_one';
+  var LS_SHA_KEY  = 'webrtc_game_sha';
+
+  /* ============================================================
+   * DOM
+   * ============================================================ */
+  var logEl        = document.getElementById('log');
+  var statusBadge  = document.getElementById('statusBadge');
+  var signalArea   = document.getElementById('signalArea');
+  var gameSelectArea = document.getElementById('gameSelectArea');
+  var gameShell    = document.getElementById('gameShell');
+  var gameGrid     = document.getElementById('gameGrid');
+  var gameTitle    = document.getElementById('gameTitle');
+  var gameStatus   = document.getElementById('gameStatus');
+  var gameHint     = document.getElementById('gameHint');
+  var gameBody     = document.getElementById('gameBody');
+  var btnHangupSelect = document.getElementById('btnHangupSelect');
+  var btnGameHangup   = document.getElementById('btnGameHangup');
+
+  var shaPanel    = document.getElementById('shaPanel');
+  var shaStatus   = document.getElementById('shaStatus');
+  var shaInput    = document.getElementById('shaInput');
+  var btnShaSave  = document.getElementById('btnShaSave');
+  var btnShaRetry = document.getElementById('btnShaRetry');
+  var btnShaClear = document.getElementById('btnShaClear');
+  var shaError    = document.getElementById('shaError');
+
+  var btnCreateOffer = document.getElementById('btnCreateOffer');
+  var offerOut       = document.getElementById('offerOut');
+  var btnCopyOffer   = document.getElementById('btnCopyOffer');
+  var offerStat      = document.getElementById('offerStat');
+  var offerIn        = document.getElementById('offerIn');
+  var btnCreateAnswer= document.getElementById('btnCreateAnswer');
+  var answerOut      = document.getElementById('answerOut');
+  var btnCopyAnswer  = document.getElementById('btnCopyAnswer');
+  var answerStat     = document.getElementById('answerStat');
+  var answerIn       = document.getElementById('answerIn');
+  var btnApplyAnswer = document.getElementById('btnApplyAnswer');
+
+  /* ============================================================
+   * 全局状态
+   * ============================================================ */
+  var peerA = null, peerB = null;
+  var dc = null;
+  var myIsHost = null;
+  var activeGameId = null;
+  var activeController = null;
+
+  /* ============================================================
+   * 日志
+   * ============================================================ */
+  function log(message, type) {
+    type = type || 'sys';
+    var line = document.createElement('div');
+    line.className = 'log-line log-' + type;
+    var ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = '[' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ']';
+    var msg = document.createElement('span');
+    msg.className = 'msg';
+    msg.textContent = String(message);
+    line.appendChild(ts);
+    line.appendChild(msg);
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
   }
 
-  var BS_N = 10;
-  var CELL = 28;
-  var GRID = BS_N * CELL;
-  var CANVAS_W = 800;
-  var CANVAS_H = 820;
-  var MY_X = 260, MY_Y = 70;
-  var EN_X = 260, EN_Y = 470;
+  function setBadge(connected) {
+    if (connected) { statusBadge.textContent = '已连接'; statusBadge.className = 'badge on'; }
+    else { statusBadge.textContent = '未连接'; statusBadge.className = 'badge off'; }
+  }
 
-  window.GameRegistry.register('battleship', {
-    name: '海战棋',
-    icon: '🚢',
-    desc: '回合制炮击 · 主机设置舰队配置',
+  /* ============================================================
+   * 游戏注册表
+   * ============================================================ */
+  window.GameRegistry = {
+    games: {},
+    order: [],
+    register: function (id, def) {
+      if (this.games[id]) return;
+      def.id = id;
+      this.games[id] = def;
+      this.order.push(id);
+    },
+    get: function (id) { return this.games[id] || null; },
+    list: function () {
+      var self = this;
+      return this.order.map(function (id) { return self.games[id]; });
+    }
+  };
 
-    create: function (api) {
-      /* ---------- 状态 ---------- */
-      var state = {
-        phase: 'idle',
-        isHost: !!api.isHost,
-        config: [],
-        myBoard: null,
-        myShots: null,
-        myShips: [],
-        pendingShips: [],
-        currentDir: 'h',
-        myTurn: false,
-        deployed: false,
-        peerReady: false,
-        waitingResult: false,
-        gameOver: false,
-        iWon: false,
-        hoverCell: null,
-        hoverMy: null,
-        preview: null
-      };
+  /* ============================================================
+   * 视图切换
+   * ============================================================ */
+  function showGameSelect() {
+    shaPanel.style.display = 'none';
+    signalArea.style.display = 'none';
+    gameShell.style.display = 'none';
+    gameSelectArea.style.display = 'block';
+    setBadge(true);
+  }
+  function showGameShell() {
+    shaPanel.style.display = 'none';
+    signalArea.style.display = 'none';
+    gameSelectArea.style.display = 'none';
+    gameShell.style.display = 'flex';
+    setBadge(true);
+  }
+  function backToSignal() {
+    gameShell.style.display = 'none';
+    gameSelectArea.style.display = 'none';
+    signalArea.style.display = '';
+    setBadge(false);
+  }
 
-      /* ---------- DOM / 画布 ---------- */
-      var canvas = null, ctx = null;
-      var panelRoot = null;
-      var configPanel = null, waitConfigPanel = null, deployPanel = null, battlePanel = null;
-      var shipRowsEl = null, configErrorEl = null, configSummaryEl = null;
-      var turnInfoEl = null, resultInfoEl = null, confirmDeployBtn = null;
-      var dirBtn = null, undoBtn = null, clearBtn = null, pendingInfoEl = null;
-      var deployHintEl = null;
+  /* ============================================================
+   * 动态加载脚本
+   * ============================================================ */
+  function loadScript(url) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = url;
+      s.async = true;
+      s.onload = function () { resolve(); };
+      s.onerror = function () { reject(new Error('加载失败: ' + url)); };
+      document.head.appendChild(s);
+    });
+  }
 
-      /* ---------- 工具 ---------- */
-      function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+  /* ============================================================
+   * SHA 管理：localStorage 读写
+   * ============================================================ */
+  function getSavedSha() {
+    try {
+      var v = localStorage.getItem(LS_SHA_KEY);
+      if (v && /^[a-f0-9]{40}$/i.test(v)) return v.toLowerCase();
+    } catch (e) { /* localStorage 不可用时静默失败 */ }
+    return null;
+  }
 
-      function createEmptyBoard() {
-        var b = [];
-        for (var y = 0; y < BS_N; y++) {
-          var row = [];
-          for (var x = 0; x < BS_N; x++) row.push({ shipId: null, shot: null });
-          b.push(row);
+  function saveSha(sha) {
+    try {
+      localStorage.setItem(LS_SHA_KEY, sha);
+      return true;
+    } catch (e) {
+      log('保存 SHA 到 localStorage 失败：' + e.message, 'err');
+      return false;
+    }
+  }
+
+  function clearSavedSha() {
+    try { localStorage.removeItem(LS_SHA_KEY); } catch (e) { /* 忽略 */ }
+  }
+
+  /* ============================================================
+   * SHA 面板显示 / 隐藏
+   *   mode: 'manual'        全部失败，需要用户输入
+   *   mode: 'stale-local'   使用本地 SHA 兜底，但可能过时
+   * ============================================================ */
+  function showShaPanel(mode, currentSha, message) {
+    shaPanel.style.display = 'block';
+    shaError.textContent = '';
+
+    shaStatus.className = '';
+    if (mode === 'stale-local') {
+      shaStatus.classList.add('stale');
+      shaStatus.innerHTML = message || '当前使用本地保存的 SHA（可能不是最新版本）。';
+    } else if (mode === 'manual') {
+      shaStatus.classList.add('fail');
+      shaStatus.innerHTML = message || '无法加载游戏，请手动输入有效的 commit SHA。';
+    } else {
+      shaStatus.textContent = message || '请输入最新的 40 位 commit SHA。';
+    }
+
+    shaInput.value = currentSha || '';
+    if (currentSha) shaInput.select();
+    shaInput.focus();
+  }
+
+  function hideShaPanel() {
+    shaPanel.style.display = 'none';
+  }
+
+  /* ============================================================
+   * 从 GitHub API 获取最新 commit SHA
+   * ============================================================ */
+  function getLatestCommitSha() {
+    var apiUrl = 'https://api.github.com/repos/'
+      + REPO_OWNER + '/' + REPO_NAME + '/commits/' + REPO_BRANCH;
+
+    return fetch(apiUrl, {
+      headers: { 'Accept': 'application/vnd.github.v3+json' }
+    }).then(function (res) {
+      if (!res.ok) throw new Error('GitHub API 返回 ' + res.status);
+      return res.json();
+    }).then(function (data) {
+      var commit = null;
+      if (Array.isArray(data)) {
+        commit = data[0];
+      } else if (data && data.sha) {
+        commit = data;
+      }
+      var sha = commit && commit.sha;
+      if (!sha || !/^[a-f0-9]{40}$/i.test(sha)) {
+        console.warn('[SHA] 无法解析，实际响应结构：', data);
+        throw new Error('无法从响应中解析 commit SHA');
+      }
+      return sha.toLowerCase();
+    });
+  }
+
+  /* ============================================================
+   * 按指定 SHA 加载所有脚本
+   * ============================================================ */
+  async function loadAllScripts(sha) {
+    var CDN_BASE = 'https://cdn.jsdmirror.com/gh/'
+      + REPO_OWNER + '/' + REPO_NAME + '@' + sha + '/'
+      + REPO_PATH + '/';
+
+    try {
+      await loadScript(CDN_BASE + 'games-list.js');
+    } catch (e) {
+      log('加载 games-list.js 失败：' + e.message, 'err');
+      renderGameCards();
+      return false;
+    }
+
+    var manifest = window.GAMES_MANIFEST || [];
+    if (!manifest.length) {
+      log('games-list.js 中未定义 GAMES_MANIFEST', 'err');
+      renderGameCards();
+      return false;
+    }
+
+    var allOk = true;
+    for (var i = 0; i < manifest.length; i++) {
+      var item = manifest[i];
+      try {
+        await loadScript(CDN_BASE + item.file);
+      } catch (e) {
+        log('加载 ' + item.file + ' 失败：' + e.message, 'err');
+        allOk = false;
+        continue;
+      }
+      if (!window.GameRegistry || !window.GameRegistry.get(item.id)) {
+        log('游戏 ' + item.id + '（' + item.file + '）未能注册，脚本可能语法错误', 'err');
+        allOk = false;
+      }
+    }
+
+    renderGameCards();
+    return allOk;
+  }
+
+  /* ============================================================
+   * 启动流程
+   *   1. 先请求 GitHub API 拿最新 SHA（保证不会静默用旧 SHA）
+   *   2. API 成功 → 用最新 SHA 加载 → 同步 localStorage
+   *   3. API 失败或新 SHA 加载失败 → 回退到本地 SHA，但显示面板警告
+   *   4. 全部失败 → 显示面板等待手动输入
+   * ============================================================ */
+  async function bootstrap() {
+    var saved = getSavedSha();
+    var apiSha = null;
+    var apiError = null;
+
+    // 第 1 步：尝试获取最新 SHA
+    try {
+      apiSha = await getLatestCommitSha();
+      log('获取最新 commit SHA：' + apiSha.slice(0, 7) + '…', 'sys');
+    } catch (e) {
+      apiError = e;
+      log('获取 commit SHA 失败：' + e.message + '（可能是网络或环境限制）', 'err');
+    }
+
+    // 第 2 步：有最新 SHA 时优先使用
+    if (apiSha) {
+      if (saved && saved !== apiSha) {
+        log('本地保存的 SHA (' + saved.slice(0, 7) + '…) 不是最新版本，改用最新 SHA', 'sys');
+      }
+      var okApi = await loadAllScripts(apiSha);
+      if (okApi) {
+        if (saved !== apiSha) {
+          saveSha(apiSha);
+          log('已将最新 SHA 同步到本地存储', 'sys');
         }
-        return b;
+        hideShaPanel();
+        return;
       }
-      function createEmptyShots() {
-        var b = [];
-        for (var y = 0; y < BS_N; y++) {
-          var row = [];
-          for (var x = 0; x < BS_N; x++) row.push(null);
-          b.push(row);
-        }
-        return b;
-      }
-      function formatConfig(cfg) {
-        return cfg.map(function (s) { return s.len + '格×' + s.count; }).join('，');
-      }
-      function formatPending() {
-        if (!state.pendingShips.length) return '全部放置完成';
-        return state.pendingShips.map(function (l) { return l + '格'; }).join(' · ');
-      }
-      function countAliveShips() {
-        return state.myShips.filter(function (s) { return s.hits < s.len; }).length;
-      }
-      function totalShipCells(cfg) {
-        return cfg.reduce(function (acc, s) { return acc + s.len * s.count; }, 0);
-      }
-      function cellName(x, y) {
-        return String.fromCharCode(65 + x) + (y + 1);
-      }
+      log('最新 SHA 加载失败（CDN 可能未同步），尝试回退到本地保存的 SHA…', 'err');
+    }
 
-      /* ============================================================
-       * 面板构建
-       * ============================================================ */
-      function buildConfigPanel() {
-        configPanel = document.createElement('div');
-        configPanel.className = 'bs-subpanel';
-        configPanel.innerHTML =
-          '<h3>设置舰队配置</h3>' +
-          '<p class="hint" style="margin-bottom:10px;">设置每种舰船的长度（1~5）和数量，总格数不超过 70。</p>' +
-          '<div class="bs-ship-rows"></div>' +
-          '<div class="row" style="margin-top:10px;">' +
-            '<button type="button" class="bs-add-row">+ 添加舰船类型</button>' +
-            '<button type="button" class="bs-confirm-config">确认配置</button>' +
-          '</div>' +
-          '<p class="hint warn bs-config-error"></p>';
-
-        shipRowsEl = configPanel.querySelector('.bs-ship-rows');
-        configErrorEl = configPanel.querySelector('.bs-config-error');
-
-        configPanel.querySelector('.bs-add-row').addEventListener('click', function () {
-          addConfigRow(2, 1);
-        });
-        configPanel.querySelector('.bs-confirm-config').addEventListener('click', onConfirmConfig);
-
-        addConfigRow(4, 1);
-        addConfigRow(3, 2);
-        addConfigRow(2, 3);
-        addConfigRow(1, 4);
-      }
-
-      function addConfigRow(len, count) {
-        var row = document.createElement('div');
-        row.className = 'bs-config-row';
-        row.innerHTML =
-          '<span>长度</span>' +
-          '<input type="number" min="1" max="5" value="' + len + '" class="bs-input bs-len">' +
-          '<span>数量</span>' +
-          '<input type="number" min="0" max="6" value="' + count + '" class="bs-input bs-count">' +
-          '<button type="button" class="danger bs-del" style="padding:4px 10px;font-size:12px;">删除</button>';
-        row.querySelector('.bs-del').addEventListener('click', function () {
-          if (row.parentNode) row.parentNode.removeChild(row);
-        });
-        shipRowsEl.appendChild(row);
-      }
-
-      function readConfig() {
-        var rows = shipRowsEl.querySelectorAll('.bs-config-row');
-        var cfg = [];
-        for (var i = 0; i < rows.length; i++) {
-          var len = parseInt(rows[i].querySelector('.bs-len').value, 10);
-          var cnt = parseInt(rows[i].querySelector('.bs-count').value, 10);
-          if (isNaN(len) || isNaN(cnt)) continue;
-          if (len < 1 || len > 5) continue;
-          if (cnt < 0 || cnt > 6) continue;
-          if (cnt === 0) continue;
-          var merged = false;
-          for (var j = 0; j < cfg.length; j++) {
-            if (cfg[j].len === len) { cfg[j].count += cnt; merged = true; break; }
-          }
-          if (!merged) cfg.push({ len: len, count: cnt });
-        }
-        return cfg;
-      }
-
-      function validateConfig(cfg) {
-        if (!cfg.length) return '至少需要一种舰船';
-        var total = totalShipCells(cfg);
-        var count = cfg.reduce(function (a, s) { return a + s.count; }, 0);
-        if (total > 70) return '舰船总格数过多（' + total + ' 格），最多 70 格';
-        if (count > 20) return '舰船总数过多（' + count + ' 艘），最多 20 艘';
-        return null;
-      }
-
-      function buildDeployPanel() {
-        deployPanel = document.createElement('div');
-        deployPanel.className = 'bs-subpanel';
-        deployPanel.innerHTML =
-          '<p>舰队配置：<span class="bs-summary">—</span></p>' +
-          '<p class="bs-pending" style="font-size:13px;color:#d29922;">—</p>' +
-          '<div class="row" style="margin-top:8px;">' +
-            '<button type="button" class="bs-dir">方向：横向</button>' +
-            '<button type="button" class="bs-undo" disabled>撤销</button>' +
-            '<button type="button" class="bs-clear" disabled>清空</button>' +
-            '<button type="button" class="bs-random">随机部署</button>' +
-            '<button type="button" class="bs-confirm-deploy" disabled>确认部署</button>' +
-          '</div>' +
-          '<p class="hint bs-deploy-hint">点击左侧「我的海域」逐艘放置舰船；按 R 键或点「方向」切换横/竖。</p>';
-
-        configSummaryEl = deployPanel.querySelector('.bs-summary');
-        pendingInfoEl = deployPanel.querySelector('.bs-pending');
-        dirBtn = deployPanel.querySelector('.bs-dir');
-        undoBtn = deployPanel.querySelector('.bs-undo');
-        clearBtn = deployPanel.querySelector('.bs-clear');
-        confirmDeployBtn = deployPanel.querySelector('.bs-confirm-deploy');
-        deployHintEl = deployPanel.querySelector('.bs-deploy-hint');
-
-        dirBtn.addEventListener('click', toggleDirection);
-        undoBtn.addEventListener('click', onUndo);
-        clearBtn.addEventListener('click', onClear);
-        deployPanel.querySelector('.bs-random').addEventListener('click', onRandomDeploy);
-        confirmDeployBtn.addEventListener('click', onConfirmDeploy);
-      }
-
-      function buildWaitConfigPanel() {
-        waitConfigPanel = document.createElement('div');
-        waitConfigPanel.className = 'bs-subpanel';
-        waitConfigPanel.innerHTML = '<p>等待主机设置舰队配置…</p>';
-      }
-
-      function buildBattlePanel() {
-        battlePanel = document.createElement('div');
-        battlePanel.className = 'bs-subpanel';
-        battlePanel.innerHTML =
-          '<p class="bs-turn" style="font-size:14px;font-weight:600;">—</p>' +
-          '<p class="bs-result hint"></p>';
-        turnInfoEl = battlePanel.querySelector('.bs-turn');
-        resultInfoEl = battlePanel.querySelector('.bs-result');
-      }
-
-      function showPanel(name) {
-        [configPanel, waitConfigPanel, deployPanel, battlePanel].forEach(function (el) {
-          if (el) el.style.display = 'none';
-        });
-        if (name === 'config' && configPanel) configPanel.style.display = 'block';
-        else if (name === 'waitConfig' && waitConfigPanel) waitConfigPanel.style.display = 'block';
-        else if (name === 'deploy' && deployPanel) deployPanel.style.display = 'block';
-        else if (name === 'battle' && battlePanel) battlePanel.style.display = 'block';
-      }
-
-      /* ============================================================
-       * 配置阶段
-       * ============================================================ */
-      function onConfirmConfig() {
-        var cfg = readConfig();
-        var err = validateConfig(cfg);
-        if (err) {
-          configErrorEl.textContent = err;
-          return;
-        }
-        configErrorEl.textContent = '';
-        state.config = cfg;
-
-        api.send({ t: 'bs:config', ships: cfg });
-        api.log('舰队配置已确认：' + formatConfig(cfg) + '，共 ' + totalShipCells(cfg) + ' 格', 'sys');
-
-        enterDeploy();
-      }
-
-      /* ============================================================
-       * 部署阶段
-       * ============================================================ */
-      function buildPendingQueue() {
-        var lens = [];
-        state.config.forEach(function (s) {
-          for (var i = 0; i < s.count; i++) lens.push(s.len);
-        });
-        lens.sort(function (a, b) { return b - a; });
-        return lens;
-      }
-
-      function enterDeploy() {
-        state.phase = 'deploy';
-        state.myBoard = createEmptyBoard();
-        state.myShots = createEmptyShots();
-        state.myShips = [];
-        state.pendingShips = buildPendingQueue();
-        state.currentDir = 'h';
-        state.deployed = false;
-        state.peerReady = false;
-        state.preview = null;
-        state.hoverMy = null;
-
-        configSummaryEl.textContent = formatConfig(state.config);
-        showPanel('deploy');
-        updateDeployUI();
-        api.setStatus('部署阶段', 'wait');
-        api.setHint('点击左侧「我的海域」逐艘放置舰船；按 R 键切换横/竖。');
-        draw();
-      }
-
-      function updateDeployUI() {
-        pendingInfoEl.textContent = '待放置：' + formatPending();
-        dirBtn.textContent = '方向：' + (state.currentDir === 'h' ? '横向' : '纵向');
-        undoBtn.disabled = state.myShips.length === 0;
-        clearBtn.disabled = state.myShips.length === 0;
-        var allPlaced = state.pendingShips.length === 0;
-        confirmDeployBtn.disabled = !allPlaced || state.deployed;
-        if (allPlaced && !state.deployed) {
-          deployHintEl.textContent = '全部舰船已放置，确认后等待对方。';
-        } else if (state.deployed) {
-          deployHintEl.textContent = '已确认，等待对方部署…';
+    // 第 3 步：回退到本地 SHA
+    if (saved) {
+      log('使用本地保存的 SHA：' + saved.slice(0, 7) + '…（可能已过时）', 'sys');
+      var okLocal = await loadAllScripts(saved);
+      if (okLocal) {
+        // 【关键】即使用本地 SHA 加载成功，也显示面板警告，避免用户不知情用过时版本
+        var msg;
+        if (apiSha) {
+          msg = '⚠️ <b>最新 SHA 加载失败</b>（CDN 可能未同步），<br>'
+              + '当前使用本地保存的 SHA：<code>' + saved.slice(0, 7) + '…</code>。<br>'
+              + '如果游戏代码不是最新版，可点击「重新尝试自动获取」，或手动输入有效 SHA。';
         } else {
-          deployHintEl.textContent = '点击左侧「我的海域」逐艘放置舰船；按 R 键切换横/竖。';
+          msg = '⚠️ <b>无法获取最新 SHA</b>'
+              + (apiError ? '（' + apiError.message + '）' : '')
+              + '<br>当前使用本地保存的 SHA：<code>' + saved.slice(0, 7) + '…</code>。<br>'
+              + '如果这不是最新版本，请手动输入最新 SHA，或点击「重新尝试自动获取」。';
         }
+        showShaPanel('stale-local', saved, msg);
+        return;
       }
+      log('本地 SHA 加载失败（可能是 CDN 未同步或 SHA 已失效）', 'err');
+    }
 
-      function toggleDirection() {
-        if (state.phase !== 'deploy') return;
-        state.currentDir = state.currentDir === 'h' ? 'v' : 'h';
-        updateDeployUI();
-        updateDeployPreview();
-        draw();
+    // 第 4 步：全部失败
+    var failMsg = '❌ <b>无法加载游戏</b>。';
+    if (apiError) failMsg += '获取最新 SHA 失败：' + apiError.message + '。';
+    if (saved) failMsg += '本地保存的 SHA 也加载失败。';
+    failMsg += '请手动输入有效的 commit SHA。';
+    showShaPanel('manual', saved || '', failMsg);
+  }
+
+  /* ============================================================
+   * SHA 面板按钮
+   * ============================================================ */
+  btnShaSave.addEventListener('click', async function () {
+    var v = shaInput.value.trim().toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(v)) {
+      shaError.textContent = 'SHA 必须是 40 位十六进制字符（0-9、a-f）';
+      return;
+    }
+
+    shaError.textContent = '';
+    saveSha(v);
+    log('已保存 SHA：' + v.slice(0, 7) + '…，开始加载脚本…', 'sys');
+
+    var hadGames = window.GameRegistry.list().length > 0;
+    var ok = await loadAllScripts(v);
+    if (ok) {
+      hideShaPanel();
+      log('所有游戏加载成功。', 'sys');
+      if (hadGames) {
+        log('提示：已加载过的游戏代码仍为旧版本，如需最新代码请刷新页面。', 'sys');
       }
-
-      function updateDeployPreview() {
-        if (state.phase !== 'deploy' || !state.hoverMy || !state.pendingShips.length) {
-          state.preview = null;
-          return;
-        }
-        var x = state.hoverMy.x, y = state.hoverMy.y;
-        var len = state.pendingShips[0];
-        var cells = [];
-        var valid = true;
-        for (var i = 0; i < len; i++) {
-          var cx = state.currentDir === 'h' ? x + i : x;
-          var cy = state.currentDir === 'h' ? y : y + i;
-          if (cx >= BS_N || cy >= BS_N) { valid = false; continue; }
-          if (state.myBoard[cy][cx].shipId !== null) valid = false;
-          cells.push({ x: cx, y: cy });
-        }
-        state.preview = { cells: cells, valid: valid };
-      }
-
-      function tryPlaceShip(x, y) {
-        if (!state.pendingShips.length) return { ok: false, msg: '没有待放置的舰船' };
-        var len = state.pendingShips[0];
-        var cells = [];
-        for (var i = 0; i < len; i++) {
-          var cx = state.currentDir === 'h' ? x + i : x;
-          var cy = state.currentDir === 'h' ? y : y + i;
-          if (cx >= BS_N || cy >= BS_N) return { ok: false, msg: '超出边界，换个位置或切换方向' };
-          if (state.myBoard[cy][cx].shipId !== null) return { ok: false, msg: '与已有舰船重叠' };
-          cells.push({ x: cx, y: cy });
-        }
-        var id = state.myShips.length;
-        var ship = { id: id, len: len, cells: cells, hits: 0 };
-        cells.forEach(function (c) { state.myBoard[c.y][c.x].shipId = id; });
-        state.myShips.push(ship);
-        state.pendingShips.shift();
-        return { ok: true };
-      }
-
-      function onUndo() {
-        if (state.phase !== 'deploy' || !state.myShips.length) return;
-        var ship = state.myShips.pop();
-        ship.cells.forEach(function (c) { state.myBoard[c.y][c.x].shipId = null; });
-        state.pendingShips.unshift(ship.len);
-        updateDeployUI();
-        updateDeployPreview();
-        draw();
-      }
-
-      function onClear() {
-        if (state.phase !== 'deploy') return;
-        state.myBoard = createEmptyBoard();
-        state.myShips = [];
-        state.pendingShips = buildPendingQueue();
-        updateDeployUI();
-        updateDeployPreview();
-        draw();
-      }
-
-      function onRandomDeploy() {
-        if (state.phase !== 'deploy') return;
-        var lens = buildPendingQueue();
-        for (var outer = 0; outer < 200; outer++) {
-          var board = createEmptyBoard();
-          var ships = [];
-          var ok = true;
-          var id = 0;
-          for (var i = 0; i < lens.length && ok; i++) {
-            var len = lens[i];
-            var placed = false;
-            for (var attempt = 0; attempt < 300; attempt++) {
-              var horiz = Math.random() < 0.5;
-              var maxX = horiz ? BS_N - len : BS_N - 1;
-              var maxY = horiz ? BS_N - 1 : BS_N - len;
-              var sx = Math.floor(Math.random() * (maxX + 1));
-              var sy = Math.floor(Math.random() * (maxY + 1));
-              var cells = [];
-              var canPlace = true;
-              for (var k = 0; k < len; k++) {
-                var cx = horiz ? sx + k : sx;
-                var cy = horiz ? sy : sy + k;
-                if (board[cy][cx].shipId !== null) { canPlace = false; break; }
-                cells.push({ x: cx, y: cy });
-              }
-              if (!canPlace) continue;
-              var ship = { id: id++, len: len, cells: cells, hits: 0 };
-              for (var m = 0; m < cells.length; m++) {
-                board[cells[m].y][cells[m].x].shipId = ship.id;
-              }
-              ships.push(ship);
-              placed = true;
-              break;
-            }
-            if (!placed) { ok = false; }
-          }
-          if (ok) {
-            state.myBoard = board;
-            state.myShips = ships;
-            state.pendingShips = [];
-            updateDeployUI();
-            draw();
-            api.log('随机部署完成', 'sys');
-            return;
-          }
-        }
-        api.log('随机部署失败，请调整舰队配置（可能是总格数过大导致放不下）', 'err');
-      }
-
-      function onConfirmDeploy() {
-        if (state.phase !== 'deploy' || state.deployed) return;
-        if (state.pendingShips.length) {
-          api.log('还有 ' + state.pendingShips.length + ' 艘舰船未放置', 'err');
-          return;
-        }
-        state.deployed = true;
-        state.phase = 'waitPeer';
-        updateDeployUI();
-        api.send({ t: 'bs:ready' });
-        api.setStatus('等待对方部署', 'wait');
-        api.log('本端部署完成，等待对方…', 'sys');
-        draw();
-        maybeStartBattle();
-      }
-
-      /* ============================================================
-       * 开局
-       * ============================================================ */
-      function maybeStartBattle() {
-        if (!state.deployed || !state.peerReady) return;
-        if (state.isHost) {
-          var firstTurn = Math.random() < 0.5 ? 'host' : 'guest';
-          api.send({ t: 'bs:start', firstTurn: firstTurn });
-          beginBattle(firstTurn);
-        }
-      }
-
-      function beginBattle(firstTurn) {
-        state.phase = 'battle';
-        state.gameOver = false;
-        state.iWon = false;
-        state.waitingResult = false;
-        state.preview = null;
-        state.myTurn =
-          (state.isHost && firstTurn === 'host') ||
-          (!state.isHost && firstTurn === 'guest');
-
-        showPanel('battle');
-        updateBattleStatus();
-        api.setHint('点击下方「敌方海域」的格子发起炮击。');
-        draw();
-      }
-
-      function updateBattleStatus() {
-        if (state.gameOver) {
-          api.setStatus(state.iWon ? '你赢了 🎉' : '你输了', state.iWon ? 'host' : 'over');
-          turnInfoEl.textContent = state.iWon ? '胜利！对方舰队已全部被击沉。' : '失败！你的舰队已被全部击沉。';
-          return;
-        }
-        if (state.waitingResult) {
-          api.setStatus('等待对方回执…', 'wait');
-          turnInfoEl.textContent = '已发射，等待对方判定…';
-          return;
-        }
-        if (state.myTurn) {
-          api.setStatus('你的回合', 'turn');
-          turnInfoEl.textContent = '你的回合：点击敌方海域发起炮击';
-        } else {
-          api.setStatus('对方回合', 'wait');
-          turnInfoEl.textContent = '对方回合：等待对方炮击…';
-        }
-      }
-
-      /* ============================================================
-       * 攻击 / 判定
-       * ============================================================ */
-      function executeAction() {
-        if (state.phase === 'deploy' && state.hoverMy) {
-          var res = tryPlaceShip(state.hoverMy.x, state.hoverMy.y);
-          if (!res.ok) {
-            api.log('放置失败：' + res.msg, 'err');
-            deployHintEl.textContent = '放置失败：' + res.msg;
-          } else {
-            updateDeployUI();
-            updateDeployPreview();
-          }
-          draw();
-          return;
-        }
-
-        if (state.phase === 'battle' && state.hoverCell
-            && state.myTurn && !state.waitingResult && !state.gameOver) {
-          var cell = state.hoverCell;
-          if (state.myShots[cell.y][cell.x] !== null) {
-            resultInfoEl.textContent = '这个格子已经打过了，换一个。';
-            return;
-          }
-          state.waitingResult = true;
-          state.myShots[cell.y][cell.x] = 'pending';
-          api.send({ t: 'bs:attack', x: cell.x, y: cell.y });
-          api.log('发起炮击：' + cellName(cell.x, cell.y), 'send');
-          resultInfoEl.textContent = '';
-          updateBattleStatus();
-          draw();
-        }
-      }
-
-      function onReceiveAttack(msg) {
-        if (state.phase !== 'battle' || state.gameOver) return;
-        var x = msg.x, y = msg.y;
-        if (typeof x !== 'number' || typeof y !== 'number') return;
-        if (x < 0 || x >= BS_N || y < 0 || y >= BS_N) return;
-
-        var cell = state.myBoard[y][x];
-        if (cell.shot !== null) {
-          api.send({ t: 'bs:result', x: x, y: y, hit: cell.shot === 'hit', sunk: false, gameOver: false, nextTurn: false });
-          return;
-        }
-
-        var hit = cell.shipId !== null;
-        var sunk = false;
-
-        if (hit) {
-          cell.shot = 'hit';
-          for (var i = 0; i < state.myShips.length; i++) {
-            if (state.myShips[i].id === cell.shipId) {
-              state.myShips[i].hits++;
-              if (state.myShips[i].hits >= state.myShips[i].len) sunk = true;
-              break;
-            }
-          }
-        } else {
-          cell.shot = 'miss';
-        }
-
-        var allSunk = countAliveShips() === 0;
-        var gameOver = allSunk;
-        var nextTurn = !hit;
-
-        api.send({
-          t: 'bs:result',
-          x: x, y: y,
-          hit: hit,
-          sunk: sunk,
-          gameOver: gameOver,
-          nextTurn: nextTurn
-        });
-        api.log('被炮击 ' + cellName(x, y) + '：' + (hit ? (sunk ? '命中并击沉' : '命中') : '未命中'), 'recv');
-
-        if (gameOver) {
-          state.gameOver = true;
-          state.iWon = false;
-          updateBattleStatus();
-        } else if (nextTurn) {
-          state.myTurn = true;
-          updateBattleStatus();
-        }
-        draw();
-      }
-
-      function onReceiveResult(msg) {
-        var x = msg.x, y = msg.y;
-        if (typeof x !== 'number' || typeof y !== 'number') return;
-        if (x < 0 || x >= BS_N || y < 0 || y >= BS_N) return;
-
-        state.waitingResult = false;
-        state.myShots[y][x] = msg.hit ? 'hit' : 'miss';
-
-        var text = '炮击 ' + cellName(x, y) + '：' + (msg.hit ? (msg.sunk ? '命中并击沉！' : '命中！') : '未命中');
-        resultInfoEl.textContent = text;
-        api.log(text, 'recv');
-
-        if (msg.gameOver) {
-          state.gameOver = true;
-          state.iWon = true;
-          updateBattleStatus();
-        } else if (msg.nextTurn) {
-          state.myTurn = false;
-          updateBattleStatus();
-        } else {
-          state.myTurn = true;
-          updateBattleStatus();
-        }
-        draw();
-      }
-
-      /* ============================================================
-       * 命中检测
-       * ============================================================ */
-      function hitTest(e, which) {
-        if (!canvas) return null;
-        var rect = canvas.getBoundingClientRect();
-        if (!rect.width || !rect.height) return null;
-        var sx = (e.clientX - rect.left) / rect.width * CANVAS_W;
-        var sy = (e.clientY - rect.top) / rect.height * CANVAS_H;
-
-        var ox = which === 'my' ? MY_X : EN_X;
-        var oy = which === 'my' ? MY_Y : EN_Y;
-
-        if (sx < ox || sx >= ox + GRID || sy < oy || sy >= oy + GRID) return null;
-        var cx = Math.floor((sx - ox) / CELL);
-        var cy = Math.floor((sy - oy) / CELL);
-        if (cx < 0 || cx >= BS_N || cy < 0 || cy >= BS_N) return null;
-        return { x: cx, y: cy };
-      }
-
-      /* ============================================================
-       * 触屏 / 鼠标统一指针处理
-       *   pointerdown  阻止默认行为（触屏防滚动）+ 更新悬停
-       *   pointermove  更新悬停与预览（桌面鼠标可看到预览）
-       *   pointerup    执行放置 / 攻击（触屏按住拖动 → 松手落在哪个格子就执行到哪个）
-       *   pointerleave / pointercancel  清空悬停与预览
-       * ============================================================ */
-      function updateHover(e) {
-        if (!canvas) return;
-
-        if (state.phase === 'deploy') {
-          var my = hitTest(e, 'my');
-          var changed = (my && !state.hoverMy)
-            || (!my && state.hoverMy)
-            || (my && state.hoverMy && (my.x !== state.hoverMy.x || my.y !== state.hoverMy.y));
-          state.hoverMy = my;
-          state.hoverCell = null;
-          updateDeployPreview();
-          if (changed || state.preview) draw();
-          return;
-        }
-
-        if (state.phase === 'battle') {
-          var cell = hitTest(e, 'enemy');
-          var changed2 = (cell && !state.hoverCell)
-            || (!cell && state.hoverCell)
-            || (cell && state.hoverCell && (cell.x !== state.hoverCell.x || cell.y !== state.hoverCell.y));
-          state.hoverCell = cell;
-          state.hoverMy = null;
-          if (changed2) draw();
-          return;
-        }
-
-        if (state.hoverCell || state.hoverMy) {
-          state.hoverCell = null;
-          state.hoverMy = null;
-          state.preview = null;
-          draw();
-        }
-      }
-
-      function onPointerDown(e) {
-        if (!canvas) return;
-        e.preventDefault();
-        updateHover(e);
-      }
-
-      function onPointerMove(e) {
-        if (!canvas) return;
-        updateHover(e);
-      }
-
-      function onPointerUp(e) {
-        if (!canvas) return;
-        e.preventDefault();
-        updateHover(e);
-        executeAction();
-      }
-
-      function onPointerLeave(e) {
-        if (state.hoverCell || state.hoverMy) {
-          state.hoverCell = null;
-          state.hoverMy = null;
-          state.preview = null;
-          draw();
-        }
-      }
-
-      function onKeyDown(e) {
-        if (state.phase !== 'deploy') return;
-        if (e.key === 'r' || e.key === 'R') {
-          e.preventDefault();
-          toggleDirection();
-        }
-      }
-
-      /* ============================================================
-       * 绘制
-       * ============================================================ */
-      function draw() {
-        if (!ctx) return;
-        ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-        ctx.fillStyle = '#0d1117';
-        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-        drawGridTitle('我的海域', MY_X, MY_Y, '#3fb950');
-        drawGridTitle('敌方海域', EN_X, EN_Y, '#f85149');
-
-        drawGridBase(MY_X, MY_Y);
-        drawGridBase(EN_X, EN_Y);
-
-        if (state.myBoard) {
-          for (var y = 0; y < BS_N; y++) {
-            for (var x = 0; x < BS_N; x++) {
-              var cell = state.myBoard[y][x];
-              var px = MY_X + x * CELL;
-              var py = MY_Y + y * CELL;
-              if (cell.shipId !== null) {
-                ctx.fillStyle = cell.shot === 'hit' ? '#f85149' : '#1f6feb';
-                ctx.fillRect(px + 2, py + 2, CELL - 4, CELL - 4);
-              }
-              if (cell.shot === 'miss') {
-                ctx.fillStyle = '#8b949e';
-                ctx.beginPath();
-                ctx.arc(px + CELL / 2, py + CELL / 2, 5, 0, Math.PI * 2);
-                ctx.fill();
-              }
-              if (cell.shot === 'hit') {
-                ctx.strokeStyle = '#ffffff';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(px + 8, py + 8); ctx.lineTo(px + CELL - 8, py + CELL - 8);
-                ctx.moveTo(px + CELL - 8, py + 8); ctx.lineTo(px + 8, py + CELL - 8);
-                ctx.stroke();
-              }
-            }
-          }
-        }
-
-        if (state.phase === 'deploy' && state.preview) {
-          var pv = state.preview;
-          for (var i = 0; i < pv.cells.length; i++) {
-            var c = pv.cells[i];
-            var ppx = MY_X + c.x * CELL;
-            var ppy = MY_Y + c.y * CELL;
-            if (pv.valid) {
-              ctx.fillStyle = 'rgba(63,185,80,0.45)';
-              ctx.fillRect(ppx + 2, ppy + 2, CELL - 4, CELL - 4);
-              ctx.strokeStyle = '#3fb950';
-            } else {
-              ctx.fillStyle = 'rgba(248,81,73,0.45)';
-              ctx.fillRect(ppx + 2, ppy + 2, CELL - 4, CELL - 4);
-              ctx.strokeStyle = '#f85149';
-            }
-            ctx.lineWidth = 2;
-            ctx.strokeRect(ppx + 2, ppy + 2, CELL - 4, CELL - 4);
-          }
-        }
-
-        if (state.myShots) {
-          for (var yy = 0; yy < BS_N; yy++) {
-            for (var xx = 0; xx < BS_N; xx++) {
-              var s = state.myShots[yy][xx];
-              var ppx2 = EN_X + xx * CELL;
-              var ppy2 = EN_Y + yy * CELL;
-              if (s === 'hit') {
-                ctx.fillStyle = '#f85149';
-                ctx.fillRect(ppx2 + 2, ppy2 + 2, CELL - 4, CELL - 4);
-                ctx.strokeStyle = '#ffffff';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(ppx2 + 8, ppy2 + 8); ctx.lineTo(ppx2 + CELL - 8, ppy2 + CELL - 8);
-                ctx.moveTo(ppx2 + CELL - 8, ppy2 + 8); ctx.lineTo(ppx2 + 8, ppy2 + CELL - 8);
-                ctx.stroke();
-              } else if (s === 'miss') {
-                ctx.fillStyle = '#8b949e';
-                ctx.beginPath();
-                ctx.arc(ppx2 + CELL / 2, ppy2 + CELL / 2, 5, 0, Math.PI * 2);
-                ctx.fill();
-              } else if (s === 'pending') {
-                ctx.strokeStyle = '#d29922';
-                ctx.lineWidth = 2;
-                ctx.strokeRect(ppx2 + 4, ppy2 + 4, CELL - 8, CELL - 8);
-              }
-            }
-          }
-        }
-
-        if (state.hoverCell && state.phase === 'battle' && state.myTurn && !state.waitingResult && !state.gameOver) {
-          var h = state.hoverCell;
-          if (state.myShots[h.y][h.x] === null) {
-            ctx.strokeStyle = '#58a6ff';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(EN_X + h.x * CELL + 2, EN_Y + h.y * CELL + 2, CELL - 4, CELL - 4);
-          }
-        }
-
-        drawCoords(MY_X, MY_Y);
-        drawCoords(EN_X, EN_Y);
-      }
-
-      function drawGridTitle(text, ox, oy, color) {
-        ctx.fillStyle = color;
-        ctx.font = 'bold 15px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(text, ox + GRID / 2, oy - 30);
-      }
-
-      function drawGridBase(ox, oy) {
-        for (var y = 0; y < BS_N; y++) {
-          for (var x = 0; x < BS_N; x++) {
-            ctx.fillStyle = '#161b22';
-            ctx.fillRect(ox + x * CELL, oy + y * CELL, CELL, CELL);
-          }
-        }
-        ctx.strokeStyle = '#30363d';
-        ctx.lineWidth = 1;
-        for (var i = 0; i <= BS_N; i++) {
-          ctx.beginPath();
-          ctx.moveTo(ox + i * CELL, oy);
-          ctx.lineTo(ox + i * CELL, oy + GRID);
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.moveTo(ox, oy + i * CELL);
-          ctx.lineTo(ox + GRID, oy + i * CELL);
-          ctx.stroke();
-        }
-      }
-
-      function drawCoords(ox, oy) {
-        ctx.fillStyle = '#6e7681';
-        ctx.font = '11px ui-monospace, Consolas, monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        for (var j = 0; j < BS_N; j++) {
-          ctx.fillText(String.fromCharCode(65 + j), ox + j * CELL + CELL / 2, oy - 12);
-          ctx.fillText(String(j + 1), ox - 14, oy + j * CELL + CELL / 2);
-        }
-      }
-
-      /* ============================================================
-       * 消息处理
-       * ============================================================ */
-      function handleMessage(msg) {
-        if (!msg || typeof msg.t !== 'string') return;
-
-        if (msg.t === 'bs:config') {
-          if (state.phase === 'waitConfig' && Array.isArray(msg.ships)) {
-            state.config = msg.ships;
-            api.log('收到主机舰队配置：' + formatConfig(state.config), 'recv');
-            enterDeploy();
-          }
-          return;
-        }
-
-        if (msg.t === 'bs:ready') {
-          state.peerReady = true;
-          api.log('对方已部署完成', 'sys');
-          if (state.phase === 'waitPeer') {
-            api.setStatus('等待对方部署', 'wait');
-          }
-          maybeStartBattle();
-          return;
-        }
-
-        if (msg.t === 'bs:start') {
-          if (state.phase === 'waitPeer' || state.phase === 'deploy') {
-            if (!state.deployed) {
-              api.log('收到开局消息但本端尚未部署，忽略', 'err');
-              return;
-            }
-            beginBattle(msg.firstTurn === 'host' ? 'host' : 'guest');
-          }
-          return;
-        }
-
-        if (msg.t === 'bs:attack') {
-          onReceiveAttack(msg);
-          return;
-        }
-
-        if (msg.t === 'bs:result') {
-          onReceiveResult(msg);
-          return;
-        }
-      }
-
-      /* ============================================================
-       * 生命周期
-       * ============================================================ */
-      function mount(bodyEl) {
-        canvas = document.createElement('canvas');
-        canvas.className = 'game-canvas bs-canvas';
-        var dpr = window.devicePixelRatio || 1;
-        canvas.width = CANVAS_W * dpr;
-        canvas.height = CANVAS_H * dpr;
-        ctx = canvas.getContext('2d');
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        bodyEl.appendChild(canvas);
-
-        var panelHost = document.createElement('div');
-        bodyEl.appendChild(panelHost);
-        panelRoot = panelHost;
-
-        buildConfigPanel();
-        buildWaitConfigPanel();
-        buildDeployPanel();
-        buildBattlePanel();
-
-        panelHost.appendChild(configPanel);
-        panelHost.appendChild(waitConfigPanel);
-        panelHost.appendChild(deployPanel);
-        panelHost.appendChild(battlePanel);
-
-        canvas.addEventListener('pointerdown', onPointerDown);
-        canvas.addEventListener('pointermove', onPointerMove);
-        canvas.addEventListener('pointerup', onPointerUp);
-        canvas.addEventListener('pointerleave', onPointerLeave);
-        canvas.addEventListener('pointercancel', onPointerLeave);
-        window.addEventListener('keydown', onKeyDown);
-
-        state.myBoard = createEmptyBoard();
-        state.myShots = createEmptyShots();
-        state.myShips = [];
-        state.pendingShips = [];
-        state.gameOver = false;
-
-        if (state.isHost) {
-          state.phase = 'config';
-          showPanel('config');
-          api.setStatus('设置舰队配置', 'host');
-          api.setHint('设置舰船长度与数量，总格数不超过 70。');
-        } else {
-          state.phase = 'waitConfig';
-          showPanel('waitConfig');
-          api.setStatus('等待主机配置', 'wait');
-          api.setHint('等待主机设置舰队配置…');
-        }
-
-        draw();
-      }
-
-      function unmount() {
-        if (canvas) {
-          canvas.removeEventListener('pointerdown', onPointerDown);
-          canvas.removeEventListener('pointermove', onPointerMove);
-          canvas.removeEventListener('pointerup', onPointerUp);
-          canvas.removeEventListener('pointerleave', onPointerLeave);
-          canvas.removeEventListener('pointercancel', onPointerLeave);
-        }
-        window.removeEventListener('keydown', onKeyDown);
-        canvas = null;
-        ctx = null;
-        panelRoot = null;
-        configPanel = waitConfigPanel = deployPanel = battlePanel = null;
-        shipRowsEl = configErrorEl = configSummaryEl = null;
-        turnInfoEl = resultInfoEl = confirmDeployBtn = null;
-        dirBtn = undoBtn = clearBtn = pendingInfoEl = deployHintEl = null;
-      }
-
-      return {
-        mount: mount,
-        unmount: unmount,
-        handleMessage: handleMessage
-      };
+    } else {
+      shaError.textContent = '加载失败：可能是 CDN 还没同步这个 commit，或 SHA 无效。请稍后重试或换一个 SHA。';
+      log('使用手动输入的 SHA 加载失败', 'err');
     }
   });
+
+  btnShaRetry.addEventListener('click', async function () {
+    btnShaRetry.disabled = true;
+    btnShaRetry.textContent = '获取中…';
+    shaError.textContent = '';
+    log('重新尝试自动获取最新 SHA…', 'sys');
+
+    try {
+      var apiSha = await getLatestCommitSha();
+      log('获取最新 commit SHA：' + apiSha.slice(0, 7) + '…', 'sys');
+      var hadGames = window.GameRegistry.list().length > 0;
+      var ok = await loadAllScripts(apiSha);
+      if (ok) {
+        saveSha(apiSha);
+        log('已切换到最新 SHA：' + apiSha.slice(0, 7) + '…，并同步到本地', 'sys');
+        hideShaPanel();
+        if (hadGames) {
+          log('提示：已加载过的游戏代码仍为旧版本，如需最新代码请刷新页面。', 'sys');
+        }
+      } else {
+        shaError.textContent = '最新 SHA 加载失败（CDN 可能未同步），请稍后重试或手动输入其他 SHA。';
+        log('最新 SHA 加载失败', 'err');
+      }
+    } catch (e) {
+      shaError.textContent = '获取失败：' + e.message + '。当前使用的 SHA 保持不变。';
+      log('获取 commit SHA 失败：' + e.message, 'err');
+    } finally {
+      btnShaRetry.disabled = false;
+      btnShaRetry.textContent = '重新尝试自动获取';
+    }
+  });
+
+  btnShaClear.addEventListener('click', function () {
+    clearSavedSha();
+    shaInput.value = '';
+    shaError.textContent = '';
+    log('已清除本地保存的 SHA（下次刷新会重新尝试自动获取）', 'sys');
+  });
+
+  shaInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      btnShaSave.click();
+    }
+  });
+
+  /* ============================================================
+   * 渲染游戏卡片
+   * ============================================================ */
+  function renderGameCards() {
+    gameGrid.innerHTML = '';
+    var games = window.GameRegistry.list();
+    if (!games.length) {
+      var err = document.createElement('p');
+      err.className = 'hint warn';
+      err.textContent = '没有加载到任何游戏，请检查 CDN 是否可访问，或手动输入有效的 SHA。';
+      gameGrid.appendChild(err);
+      return;
+    }
+    games.forEach(function (def) {
+      var btn = document.createElement('button');
+      btn.className = 'game-card';
+      btn.type = 'button';
+      var iconEl = document.createElement('span');
+      iconEl.className = 'game-card-icon';
+      iconEl.textContent = def.icon || '🎮';
+      var nameEl = document.createElement('span');
+      nameEl.className = 'game-card-name';
+      nameEl.textContent = def.name || '未命名';
+      var descEl = document.createElement('span');
+      descEl.className = 'game-card-desc';
+      descEl.textContent = def.desc || '';
+      btn.appendChild(iconEl);
+      btn.appendChild(nameEl);
+      btn.appendChild(descEl);
+      btn.addEventListener('click', function () { selectGame(def.id); });
+      gameGrid.appendChild(btn);
+    });
+  }
+
+  /* ============================================================
+   * 游戏生命周期
+   * ============================================================ */
+  function createApi() {
+    return {
+      isHost: myIsHost,
+      send: function (obj) {
+        if (!dc || dc.readyState !== 'open') return false;
+        try { dc.send(JSON.stringify(obj)); return true; }
+        catch (e) { log('发送失败：' + e.message, 'err'); return false; }
+      },
+      log: log,
+      setStatus: function (text, cls) {
+        gameStatus.textContent = text;
+        gameStatus.className = 'role' + (cls ? ' ' + cls : '');
+      },
+      setHint: function (text) {
+        gameHint.textContent = text || '';
+      }
+    };
+  }
+
+  function startGame(gameId) {
+    if (activeController) return;
+    var def = window.GameRegistry.get(gameId);
+    if (!def || typeof def.create !== 'function') {
+      log('未知游戏：' + gameId, 'err');
+      return;
+    }
+    activeGameId = gameId;
+    gameTitle.textContent = (def.icon || '🎮') + ' ' + (def.name || gameId);
+
+    var controller = def.create(createApi());
+    if (!controller || typeof controller.mount !== 'function') {
+      log('游戏 ' + gameId + ' 未返回有效 controller', 'err');
+      activeGameId = null;
+      return;
+    }
+    activeController = controller;
+
+    gameBody.innerHTML = '';
+    showGameShell();
+    try {
+      controller.mount(gameBody);
+    } catch (e) {
+      log('游戏 ' + gameId + ' 挂载失败：' + e.message, 'err');
+      stopGame();
+    }
+  }
+
+  function stopGame() {
+    if (activeController) {
+      try { activeController.unmount(); } catch (e) { /* 忽略 */ }
+    }
+    activeController = null;
+    activeGameId = null;
+    gameBody.innerHTML = '';
+    gameStatus.textContent = '—';
+    gameStatus.className = 'role';
+    gameHint.textContent = '—';
+  }
+
+  function selectGame(gameId) {
+    if (activeController) return;
+    if (!dc || dc.readyState !== 'open') {
+      log('数据通道未打开，无法选择游戏', 'err');
+      return;
+    }
+    try { dc.send(JSON.stringify({ t: 'select', game: gameId })); }
+    catch (e) { log('发送游戏选择失败：' + e.message, 'err'); return; }
+    log('已选择游戏：' + gameId, 'sys');
+    startGame(gameId);
+  }
+
+  /* ============================================================
+   * 消息路由
+   * ============================================================ */
+  function routeMessage(msg) {
+    if (!msg || typeof msg !== 'object') return;
+
+    if (msg.t === 'select') {
+      if (!activeController) {
+        log('对方选择了游戏：' + msg.game, 'sys');
+        startGame(msg.game);
+      }
+      return;
+    }
+
+    if (activeController) {
+      try { activeController.handleMessage(msg); }
+      catch (e) { log('游戏消息处理异常：' + e.message, 'err'); }
+    }
+  }
+
+  /* ============================================================
+   * 数据通道绑定
+   * ============================================================ */
+  function bindDC(channel, tag, isHost) {
+    dc = channel;
+    myIsHost = isHost;
+
+    channel.onopen = function () {
+      log('[' + tag + '] dc.onopen：数据通道已打开', 'sys');
+      log('本端角色：' + (isHost ? '主机（发起方）' : '客机（应答方）'), 'sys');
+      showGameSelect();
+    };
+
+    channel.onmessage = function (e) {
+      var msg;
+      try { msg = JSON.parse(e.data); }
+      catch (err) { log('[' + tag + '] 收到无法解析的消息，已忽略', 'err'); return; }
+      routeMessage(msg);
+    };
+
+    channel.onclose = function () {
+      log('[' + tag + '] dc.onclose：数据通道已关闭', 'sys');
+      stopGame();
+      backToSignal();
+    };
+
+    channel.onerror = function (e) {
+      var detail = (e && e.error && e.error.message) || (e && e.message) || '未知错误';
+      log('[' + tag + '] dc.onerror：' + detail, 'err');
+    };
+  }
+
+  /* ============================================================
+   * 等待 ICE 收集完成
+   * ============================================================ */
+  function waitIceComplete(pc, timeoutMs) {
+    timeoutMs = timeoutMs || 12000;
+    return new Promise(function (resolve) {
+      if (pc.iceGatheringState === 'complete') {
+        log('ICE 收集状态已是 complete，立即使用当前 SDP', 'info');
+        resolve(true);
+        return;
+      }
+      var done = false;
+      function finish(ok) {
+        if (done) return;
+        done = true;
+        pc.removeEventListener('icegatheringstatechange', onChange);
+        clearTimeout(timer);
+        resolve(ok);
+      }
+      function onChange() {
+        log('iceGatheringState 变化 -> ' + pc.iceGatheringState, 'info');
+        if (pc.iceGatheringState === 'complete') {
+          log('ICE 收集完成，SDP 已包含全部候选', 'sys');
+          finish(true);
+        }
+      }
+      pc.addEventListener('icegatheringstatechange', onChange);
+      var timer = setTimeout(function () {
+        log('警告：等待 ICE 收集超过 ' + (timeoutMs / 1000) + ' 秒仍未 complete，SDP 可能缺少候选，连接可能失败。', 'err');
+        finish(false);
+      }, timeoutMs);
+    });
+  }
+
+  /* ============================================================
+   * 创建 PeerConnection
+   * ============================================================ */
+  function createPeer(tag) {
+    var info = { tag: tag, pc: null, total: 0, cand: { host: 0, srflx: 0, prflx: 0, relay: 0 } };
+    // 如遇对称 NAT / 严格防火墙，需自行加入 TURN：
+    // { urls: 'turn:your.server:3478', username: 'user', credential: 'pass' }
+    var pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' }
+      ]
+    });
+    info.pc = pc;
+
+    pc.onicecandidate = function (e) {
+      if (!e.candidate) {
+        log('[' + tag + '] onicecandidate：候选收集结束', 'info');
+        return;
+      }
+      var c = e.candidate;
+      var type = c.type || 'unknown';
+      var proto = c.protocol || 'unknown';
+      info.total++;
+      if (typeof info.cand[type] !== 'number') info.cand[type] = 0;
+      info.cand[type]++;
+      log('[' + tag + '] 候选 #' + info.total + ' 类型=' + type + ' 协议=' + proto + ' 地址=' + (c.address || c.ip || '?') + ':' + c.port, 'info');
+      refreshStats();
+    };
+
+    pc.onicegatheringstatechange = function () {
+      log('[' + tag + '] iceGatheringState -> ' + pc.iceGatheringState, 'info');
+    };
+
+    pc.oniceconnectionstatechange = function () {
+      var s = pc.iceConnectionState;
+      log('[' + tag + '] iceConnectionState -> ' + s, s === 'failed' ? 'err' : 'sys');
+      if (s === 'failed' || s === 'disconnected') {
+        log('[' + tag + '] 提示：完整 SDP 已含全部候选，失败通常是 NAT/防火墙问题，需要 TURN 中继。', 'err');
+      }
+    };
+
+    pc.onconnectionstatechange = function () {
+      var s = pc.connectionState;
+      log('[' + tag + '] connectionState -> ' + s, s === 'failed' ? 'err' : 'sys');
+    };
+
+    return info;
+  }
+
+  function buildStatText(text, info) {
+    var chars = text ? text.length : 0;
+    if (!info) return '字符数 ' + chars + ' ｜ 候选 0 (host:0 srflx:0 prflx:0 relay:0)';
+    var c = info.cand;
+    return '字符数 ' + chars + ' ｜ 候选 ' + info.total
+      + ' (host:' + (c.host || 0) + ' srflx:' + (c.srflx || 0)
+      + ' prflx:' + (c.prflx || 0) + ' relay:' + (c.relay || 0) + ')';
+  }
+  function refreshStats() {
+    offerStat.textContent  = buildStatText(offerOut.value, peerA);
+    answerStat.textContent = buildStatText(answerOut.value, peerB);
+  }
+
+  /* ============================================================
+   * 复制到剪贴板
+   * ============================================================ */
+  function copyToClipboard(text, btn, label) {
+    if (!text) { log('没有可复制的内容，请先生成 SDP', 'err'); return; }
+    function flash(ok) {
+      var old = btn.textContent;
+      btn.textContent = ok ? '已复制 ✓' : '复制失败';
+      setTimeout(function () { btn.textContent = old; }, 1200);
+    }
+    function fallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        var ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        flash(ok);
+        if (ok) log(label + ' 已复制到剪贴板（回退方式）', 'sys');
+        else log(label + ' 复制失败，请手动全选文本框内容复制', 'err');
+      } catch (e2) {
+        log(label + ' 复制失败：' + e2.message + '，请手动全选文本框内容复制', 'err');
+      }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        flash(true); log(label + ' 已复制到剪贴板', 'sys');
+      }).catch(function (err) {
+        log('navigator.clipboard 写入失败（' + err.message + '），尝试回退方案…', 'sys');
+        fallback();
+      });
+    } else {
+      log('当前环境不支持 navigator.clipboard，使用回退方案…', 'sys');
+      fallback();
+    }
+  }
+
+  function closePeer(info) {
+    if (!info || !info.pc) return;
+    try { info.pc.close(); } catch (e) { /* 忽略 */ }
+  }
+
+  /* ============================================================
+   * ① 生成 Offer
+   * ============================================================ */
+  btnCreateOffer.addEventListener('click', function () {
+    (async function () {
+      try {
+        if (peerA) { closePeer(peerA); peerA = null; dc = null; stopGame(); backToSignal(); }
+        offerOut.value = '';
+        offerStat.textContent = buildStatText('', null);
+
+        peerA = createPeer('发起方');
+        var pc = peerA.pc;
+
+        // 非协商模式：只有发起方 createDataChannel，应答方靠 ondatachannel 接收。
+        var channel = pc.createDataChannel('game', { ordered: true });
+        log('已创建数据通道（非协商模式，label=game）', 'sys');
+        bindDC(channel, '发起方', true);
+
+        var offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        log('已设置本地描述（offer），开始等待 ICE 收集完成…', 'sys');
+        await waitIceComplete(pc, 12000);
+
+        offerOut.value = JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp });
+        refreshStats();
+        log('Offer 已生成，长度 ' + offerOut.value.length + ' 字符', 'sys');
+      } catch (err) {
+        log('生成 Offer 失败：' + err.message, 'err');
+      }
+    })();
+  });
+
+  /* ============================================================
+   * ② 生成 Answer
+   * ============================================================ */
+  btnCreateAnswer.addEventListener('click', function () {
+    (async function () {
+      try {
+        var raw = offerIn.value.trim();
+        if (!raw) { log('请先粘贴 Offer JSON', 'err'); return; }
+        var offerDesc;
+        try { offerDesc = JSON.parse(raw); }
+        catch (e) { log('JSON.parse 失败：' + e.message, 'err'); return; }
+        if (!offerDesc || !offerDesc.sdp || offerDesc.type !== 'offer') {
+          log('不是合法的 offer', 'err'); return;
+        }
+        if (peerB) { closePeer(peerB); peerB = null; dc = null; stopGame(); backToSignal(); }
+        answerOut.value = '';
+        answerStat.textContent = buildStatText('', null);
+
+        peerB = createPeer('应答方');
+        var pc = peerB.pc;
+
+        pc.ondatachannel = function (e) {
+          log('应答方收到远端数据通道：label=' + e.channel.label, 'sys');
+          bindDC(e.channel, '应答方', false);
+        };
+
+        await pc.setRemoteDescription(new RTCSessionDescription(offerDesc));
+        log('已设置远端描述（offer）', 'sys');
+
+        var answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        log('已设置本地描述（answer），开始等待 ICE 收集完成…', 'sys');
+        await waitIceComplete(pc, 12000);
+
+        answerOut.value = JSON.stringify({ type: 'answer', sdp: pc.localDescription.sdp });
+        refreshStats();
+        log('Answer 已生成，长度 ' + answerOut.value.length + ' 字符', 'sys');
+      } catch (err) {
+        log('生成 Answer 失败：' + err.message, 'err');
+      }
+    })();
+  });
+
+  /* ============================================================
+   * ③ 应用 Answer
+   * ============================================================ */
+  btnApplyAnswer.addEventListener('click', function () {
+    (async function () {
+      try {
+        if (!peerA || !peerA.pc) { log('当前还没有创建 Offer，请先执行第 ① 步', 'err'); return; }
+        var raw = answerIn.value.trim();
+        if (!raw) { log('请先粘贴 Answer JSON', 'err'); return; }
+        var answerDesc;
+        try { answerDesc = JSON.parse(raw); }
+        catch (e) { log('JSON.parse 失败：' + e.message, 'err'); return; }
+        if (!answerDesc || !answerDesc.sdp || answerDesc.type !== 'answer') {
+          log('不是合法的 answer', 'err'); return;
+        }
+        await peerA.pc.setRemoteDescription(new RTCSessionDescription(answerDesc));
+        log('已应用远端 Answer，等待 ICE 连接建立…', 'sys');
+        log('提示：收到 Answer 后应尽快粘贴应用，避免 ICE 凭据过期。', 'sys');
+      } catch (err) {
+        log('应用 Answer 失败：' + err.message, 'err');
+      }
+    })();
+  });
+
+  btnCopyOffer.addEventListener('click', function () { copyToClipboard(offerOut.value, btnCopyOffer, 'Offer'); });
+  btnCopyAnswer.addEventListener('click', function () { copyToClipboard(answerOut.value, btnCopyAnswer, 'Answer'); });
+
+  /* ============================================================
+   * 断开
+   * ============================================================ */
+  function hangup() {
+    log('用户主动断开连接', 'sys');
+    try { if (dc) dc.close(); } catch (e) { /* 忽略 */ }
+    dc = null;
+    if (peerA) { closePeer(peerA); peerA = null; }
+    if (peerB) { closePeer(peerB); peerB = null; }
+    stopGame();
+    backToSignal();
+  }
+  btnHangupSelect.addEventListener('click', hangup);
+  btnGameHangup.addEventListener('click', hangup);
+
+  window.addEventListener('beforeunload', function () {
+    try { if (dc) dc.close(); } catch (e) { /* 忽略 */ }
+    try { if (peerA && peerA.pc) peerA.pc.close(); } catch (e) { /* 忽略 */ }
+    try { if (peerB && peerB.pc) peerB.pc.close(); } catch (e) { /* 忽略 */ }
+  });
+
+  /* ============================================================
+   * 初始化
+   * ============================================================ */
+  refreshStats();
+  setBadge(false);
+  gameSelectArea.style.display = 'none';
+  gameShell.style.display = 'none';
+  log('页面已就绪。信令流程：① 发起方生成 Offer → ② 应答方粘贴 Offer 生成 Answer → ③ 发起方粘贴 Answer 完成连接。', 'sys');
+  log('连接建立后进入游戏选择界面，任一方选择游戏，双方自动加入。', 'sys');
+  bootstrap();
 })();
+</script>
+</body>
+</html>
