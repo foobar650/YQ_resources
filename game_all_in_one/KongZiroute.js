@@ -24,7 +24,7 @@
         LOOK_SENS_MOUSE: 0.0022,
         JOY_DEADZONE: 0.15,
         FOV_DEG: 75,
-        NEAR: 0.1,
+        NEAR: 0.15, // 略微提高近平面，给大网格留点余量
         INTRO_DURATION: 3.0
       };
       CFG.JUMP_V = Math.sqrt(2 * CFG.GRAVITY * CFG.JUMP_H);
@@ -54,7 +54,7 @@
       var introActive = false;
       var introTimer = 0;
 
-      // 内联的经典语录
+      // 内联语录（Fallback）
       var sayTexts = [
         "朽木不可雕也，粪土之墙不可污也，于予与何诛？",
         "非吾徒也。小子鸣鼓而攻之，可也。",
@@ -258,7 +258,7 @@
         return faces;
       }
 
-      // ★ 修复贴图矩阵：先将 0~1 的 UV 乘上图片真实像素尺寸，再进行映射
+      // 仿射三角形映射（修复了图片像素坐标）
       function drawAffineTriangle(ctx, img, src, dst) {
         var x0 = src[0][0] * img.width, y0 = src[0][1] * img.height;
         var x1 = src[1][0] * img.width, y1 = src[1][1] * img.height;
@@ -288,7 +288,7 @@
         ctx.restore();
       }
 
-      // ================= 图片资源加载 =================
+      // ================= 资源加载 =================
       function loadResources() {
         var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
         var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 2000);
@@ -310,28 +310,22 @@
         })
         .catch(function (err) {
           clearTimeout(timeoutId);
-          console.warn('获取最新 SHA 失败，使用 fallback SHA:', err);
         })
         .finally(function () {
-          doLoadImages();
+          doLoadAssets();
         });
       }
 
-      function doLoadImages() {
+      function doLoadAssets() {
         var baseUrl = CDN_BASE + currentSha + GAME_PATH;
 
         function loadImg(name, file) {
           var img = new Image();
           img.crossOrigin = 'Anonymous';
-          img.onload = function () {
-            images[name] = img;
-          };
+          img.onload = function () { images[name] = img; };
           img.onerror = function () {
             if (currentSha !== FALLBACK_SHA) {
-              console.warn('最新 SHA 图片加载失败，尝试 Fallback SHA: ' + file);
               img.src = CDN_BASE + FALLBACK_SHA + GAME_PATH + file;
-            } else {
-              console.error('图片加载最终失败: ' + file);
             }
           };
           img.src = baseUrl + file;
@@ -341,6 +335,25 @@
         loadImg('wantong', 'wantong.jpg');
         loadImg('map', 'map.webp');
         loadImg('larou', 'larou.jpg');
+        loadImg('obstacle', 'obstacle.jpg'); // 新增障碍物贴图
+
+        // 尝试加载 says.txt
+        fetch(baseUrl + 'says.txt')
+          .then(res => res.text())
+          .then(text => {
+            var regex = /"([^"]+)"/g;
+            var match;
+            var parsed = [];
+            while ((match = regex.exec(text)) !== null) {
+              if (match[1] && match[1].trim()) parsed.push(match[1].trim());
+            }
+            if (parsed.length > 0) {
+              sayTexts = parsed;
+            }
+          })
+          .catch(() => {
+            // 忽略错误，使用内联的 sayTexts
+          });
       }
 
       // ================= 剧情控制 =================
@@ -794,9 +807,15 @@
         var h = CFG.HALF;
 
         if (images.map) {
-          var step = 10;
+          // ★ 关键优化：step 改为 2，细分地面网格，极大减轻近处拉伸和透视变形
+          var step = 2; 
           for (var gx = -h; gx < h; gx += step) {
             for (var gz = -h; gz < h; gz += step) {
+              // 快速视野剔除，如果距离太远直接跳过（保留视野内的网格）
+              var dxc = gx + step/2 - me.x;
+              var dzc = gz + step/2 - me.z;
+              if (dxc*dxc + dzc*dzc > 2500) continue; 
+
               var p1 = [gx, 0, gz], p2 = [gx + step, 0, gz];
               var p3 = [gx + step, 0, gz + step], p4 = [gx, 0, gz + step];
               var c1 = camSpace(p1, cam), c2 = camSpace(p2, cam), c3 = camSpace(p3, cam), c4 = camSpace(p4, cam);
@@ -807,7 +826,7 @@
               var clipped = clipPolyNear(poly, NEAR);
               if (clipped.length < 3) continue;
 
-              // ★ 修复近处地块变黑：如果有任何顶点被裁剪掉，就用纯色兜底填充
+              // ★ 处理被裁切的地块：现在小网格被裁切后面积很小，可以放心用相近色填充
               if (c1[2] < NEAR || c2[2] < NEAR || c3[2] < NEAR || c4[2] < NEAR) {
                 ctx.beginPath();
                 for (var j = 0; j < clipped.length; j++) {
@@ -815,7 +834,7 @@
                   if (j === 0) ctx.moveTo(s[0], s[1]); else ctx.lineTo(s[0], s[1]);
                 }
                 ctx.closePath();
-                ctx.fillStyle = '#8B7355'; // 取地板图的近似主色，防止突兀
+                ctx.fillStyle = '#7a7768'; // 取地图近似色，避免突兀
                 ctx.fill();
               } else {
                 var s1 = proj(c1, focal, W, H), s2 = proj(c2, focal, W, H);
@@ -861,7 +880,9 @@
           var bf = boxFaces([(a.minx+a.maxx)/2, (a.miny+a.maxy)/2, (a.minz+a.maxz)/2],
             (a.maxx-a.minx)/2, (a.maxy-a.miny)/2, (a.maxz-a.minz)/2, [1,0,0], [0,1,0], [0,0,1]);
           for (var i = 0; i < bf.length; i++) {
-            bf[i].depth = distSq(bf[i].center, cam.pos); faces.push(bf[i]);
+            bf[i].depth = distSq(bf[i].center, cam.pos); 
+            bf[i].texture = 'obstacle'; // ★ 应用障碍物贴图
+            faces.push(bf[i]);
           }
         }
 
