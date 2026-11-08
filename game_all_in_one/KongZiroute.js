@@ -33,8 +33,14 @@
       var REPO = 'foobar650/YQ_resources';
       var BRANCH = 'master';
       var FALLBACK_SHA = 'b004eae7e2e52f9228ff6485dc114e3b9fe6f800';
-      var CDN_BASE = 'https://cdn.jsdmirror.com/gh/' + REPO + '@';
       var GAME_PATH = '/game_all_in_one/KZR_res/';
+      
+      // 多镜像备用
+      var MIRRORS = [
+        'https://cdn.jsdmirror.com/gh/',
+        'https://fastly.jsdelivr.net/gh/',
+        'https://gcore.jsdelivr.net/gh/'
+      ];
 
       var currentSha = FALLBACK_SHA;
       var images = {};
@@ -103,6 +109,14 @@
       var foeNet = { x: 0, y: 0, z: 0, yaw: 0 };
 
       var dom = {};
+
+      // 错误弹窗
+      function showError(msg) {
+        if (!dom.errPopup) return;
+        dom.errPopup.style.display = 'block';
+        dom.errMsg.textContent = msg;
+        console.error(msg);
+      }
 
       // ================= 数学与几何工具 =================
       function wrapAngle(a) {
@@ -275,74 +289,11 @@
         ctx.restore();
       }
 
-      // ================= 资源加载（模仿 ClassIn 兼容逻辑） =================
-      function doLoadAssets() {
-        var baseUrl = CDN_BASE + currentSha + GAME_PATH;
-
-        // 使用 fetch 获取为 Blob，防止沙箱跨域限制
-        function fetchAsBlob(url) {
-          return fetch(url, { mode: 'cors', credentials: 'omit' })
-            .then(function (res) {
-              if (!res.ok) throw new Error('HTTP ' + res.status);
-              return res.blob();
-            });
-        }
-
-        function loadImgBlob(name, file) {
-          var url = baseUrl + file;
-          return fetchAsBlob(url)
-            .then(function (blob) {
-              var blobUrl = URL.createObjectURL(blob);
-              return new Promise(function (resolve, reject) {
-                var img = new Image();
-                img.onload = function () { images[name] = img; resolve(); };
-                img.onerror = function () { reject(new Error('Image decode error')); };
-                img.src = blobUrl;
-              });
-            })
-            .catch(function (err) {
-              if (currentSha !== FALLBACK_SHA) {
-                var fbUrl = CDN_BASE + FALLBACK_SHA + GAME_PATH + file;
-                return fetchAsBlob(fbUrl)
-                  .then(function (blob) {
-                    var blobUrl = URL.createObjectURL(blob);
-                    return new Promise(function (resolve, reject) {
-                      var img = new Image();
-                      img.onload = function () { images[name] = img; resolve(); };
-                      img.onerror = function () { reject(new Error('Image decode error')); };
-                      img.src = blobUrl;
-                    });
-                  });
-              }
-              throw err;
-            });
-        }
-
-        // 开始并发加载
-        loadImgBlob('kongzi', 'kongzi.jpg');
-        loadImgBlob('wantong', 'wantong.jpg');
-        loadImgBlob('map', 'map.webp');
-        loadImgBlob('larou', 'larou.jpg');
-        loadImgBlob('obstacle', 'obstacle.jpg');
-
-        // 尝试加载 says.txt
-        fetch(baseUrl + 'says.txt', { mode: 'cors', credentials: 'omit' })
-          .then(function (res) { return res.ok ? res.text() : ''; })
-          .then(function (text) {
-            if (!text) return;
-            var regex = /"([^"]+)"/g;
-            var match, parsed = [];
-            while ((match = regex.exec(text)) !== null) {
-              if (match[1] && match[1].trim()) parsed.push(match[1].trim());
-            }
-            if (parsed.length > 0) sayTexts = parsed;
-          })
-          .catch(function () {});
-      }
-
+      // ================= 资源加载（极限兼容模式） =================
       function loadResources() {
+        // 尝试获取最新 SHA，如果超时就使用 FALLBACK
         var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 2000);
+        var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 2500);
 
         fetch('https://api.github.com/repos/' + REPO + '/branches/' + BRANCH, {
           cache: 'no-store',
@@ -350,7 +301,7 @@
           signal: controller ? controller.signal : undefined
         })
         .then(function (res) {
-          if (!res.ok) throw new Error('API error');
+          if (!res.ok) throw new Error('API Error');
           return res.json();
         })
         .then(function (data) {
@@ -361,9 +312,96 @@
         })
         .catch(function (err) {
           clearTimeout(timeoutId);
+          console.warn('获取最新 SHA 失败，使用 Fallback SHA');
         })
         .finally(function () {
           doLoadAssets();
+        });
+      }
+
+      // 下载文件并转为 base64
+      function fetchAsBase64(file) {
+        var pathIdx = 0;
+        var attempt = 0;
+        
+        function tryNext() {
+          if (pathIdx >= MIRRORS.length) {
+            return Promise.reject(new Error(file + ' 在所有镜像下载失败'));
+          }
+          var base = MIRRORS[pathIdx];
+          var url = base + REPO + '@' + currentSha + GAME_PATH + file;
+          
+          return fetch(url, { mode: 'cors', credentials: 'omit' })
+            .then(function(res) {
+              if (!res.ok) throw new Error('HTTP ' + res.status);
+              return res.arrayBuffer();
+            })
+            .then(function(buf) {
+              var bytes = new Uint8Array(buf);
+              var bin = '';
+              for (var i = 0; i < bytes.length; i += 0x8000) {
+                bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+              }
+              var mime = 'image/jpeg';
+              if (file.endsWith('.png')) mime = 'image/png';
+              if (file.endsWith('.webp')) mime = 'image/webp';
+              return 'data:' + mime + ';base64,' + btoa(bin);
+            })
+            .catch(function(err) {
+              console.warn('下载失败 [' + file + '] @ ' + base + ':', err.message);
+              attempt++;
+              if (attempt >= 2) { // 每个镜像试2次
+                pathIdx++;
+                attempt = 0;
+              }
+              return new Promise(function(r) { setTimeout(r, 300); }).then(tryNext);
+            });
+        }
+        return tryNext();
+      }
+
+      function doLoadAssets() {
+        var assets = [
+          { key: 'kongzi', file: 'kongzi.jpg' },
+          { key: 'wantong', file: 'wantong.jpg' },
+          { key: 'map', file: 'map.webp' },
+          { key: 'larou', file: 'larou.jpg' },
+          { key: 'obstacle', file: 'obstacle.jpg' }
+        ];
+
+        var loadPromises = assets.map(function(a) {
+          return fetchAsBase64(a.file)
+            .then(function(dataUrl) {
+              return new Promise(function(resolve, reject) {
+                var img = new Image();
+                img.onload = function() { images[a.key] = img; resolve(); };
+                img.onerror = function() { reject(new Error(a.file + ' 解码失败')); };
+                img.src = dataUrl;
+              });
+            })
+            .catch(function(err) {
+              showError('资源 ' + a.file + ' 加载失败: ' + err.message + '。请检查网络！');
+            });
+        });
+
+        // 尝试加载 says.txt，失败就不管（用内联的）
+        var saysPromise = fetch(MIRRORS[0] + REPO + '@' + currentSha + GAME_PATH + 'says.txt')
+          .then(function(res) { return res.ok ? res.text() : ''; })
+          .then(function(text) {
+            if (!text) return;
+            var regex = /"([^"]+)"/g;
+            var match, parsed = [];
+            while ((match = regex.exec(text)) !== null) {
+              if (match[1] && match[1].trim()) parsed.push(match[1].trim());
+            }
+            if (parsed.length > 0) sayTexts = parsed;
+          })
+          .catch(function() {});
+
+        Promise.all(loadPromises.concat([saysPromise])).then(function() {
+          if (dom.errPopup && dom.errPopup.style.display === 'none') {
+            console.log('所有资源加载成功');
+          }
         });
       }
 
@@ -1208,11 +1246,21 @@
             .fb-story-text{font-size:clamp(18px,4vw,32px);color:#fff;text-align:center;padding:0 40px;max-width:800px;line-height:1.6;opacity:0;transition:opacity 0.5s ease;}
             .fb-story-hint{position:absolute;bottom:40px;font-size:14px;color:rgba(255,255,255,.4);animation:fb-pulse 2s infinite;}
             @keyframes fb-pulse {0%,100%{opacity:.4;}50%{opacity:1;}}
+            
+            /* 错误弹窗样式 */
+            .fb-err-popup{position:absolute;top:10%;left:50%;transform:translateX(-50%);background:rgba(220,30,30,0.95);color:#fff;padding:16px 24px;border-radius:8px;z-index:9999;box-shadow:0 8px 24px rgba(0,0,0,0.5);display:none;max-width:80%;text-align:center;pointer-events:auto;}
+            .fb-err-title{font-size:16px;font-weight:bold;margin-bottom:8px;}
+            .fb-err-msg{font-size:13px;line-height:1.5;opacity:0.9;}
           `;
           document.head.appendChild(style);
 
           container.innerHTML = `
             <canvas id="fbCanvas" style="display:block;width:100%;height:100%;outline:none;touch-action:none;"></canvas>
+            
+            <div class="fb-err-popup" id="fbErrPopup">
+              <div class="fb-err-title">⚠ 资源加载失败</div>
+              <div class="fb-err-msg" id="fbErrMsg"></div>
+            </div>
             
             <div class="fb-story-overlay" id="fbStoryOverlay">
               <div class="fb-story-text" id="fbStoryText"></div>
@@ -1272,7 +1320,10 @@
             hud: document.getElementById('fbHud'),
             storyOverlay: document.getElementById('fbStoryOverlay'),
             storyText: document.getElementById('fbStoryText'),
-            storyHint: document.getElementById('fbStoryHint')
+            storyHint: document.getElementById('fbStoryHint'),
+            
+            errPopup: document.getElementById('fbErrPopup'),
+            errMsg: document.getElementById('fbErrMsg')
           };
 
           dom.btnRestart.addEventListener('click', function () {
