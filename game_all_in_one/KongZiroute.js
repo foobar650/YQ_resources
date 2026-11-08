@@ -45,6 +45,11 @@
       var images = {};
       var loadErrors = [];
 
+      // 资源同步状态
+      var localResLoaded = false;
+      var peerResLoaded = false;
+      var globalTimeoutId = 0;
+
       // ================= 状态变量 =================
       var mounted = false;
       var stage = null, canvas = null, ctx = null;
@@ -281,44 +286,21 @@
         ctx.restore();
       }
 
-      // ================= 资源加载（终极 ClassIn 兼容版） =================
-      function fetchWithFallback(file) {
-        var pathIdx = 0;
-        var attempt = 0;
+      // ================= 资源加载（并行，带 10s 超时） =================
+      function startResourceLoading() {
+        if (globalTimeoutId) clearTimeout(globalTimeoutId);
         
-        function next() {
-          if (pathIdx >= MIRRORS.length) {
-            return Promise.reject(new Error('所有镜像均下载失败'));
+        // 10 秒全局超时：如果还没加载完，强制设为完成状态
+        globalTimeoutId = setTimeout(function() {
+          if (!localResLoaded) {
+            console.warn('资源加载 10 秒超时，强制降级纯色模式');
+            loadErrors.push('加载超时');
+            onAssetsFinished();
           }
-          var base = MIRRORS[pathIdx];
-          var url = base + REPO + '@' + currentSha + GAME_PATH + file;
-          
-          var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-          var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 15000);
+        }, 10000);
 
-          return fetch(url, { mode: 'cors', credentials: 'omit', signal: controller ? controller.signal : undefined })
-            .then(function(res) {
-              clearTimeout(timeoutId);
-              if (!res.ok) throw new Error('HTTP ' + res.status);
-              return res.blob();
-            })
-            .catch(function(err) {
-              clearTimeout(timeoutId);
-              console.warn('加载 ' + file + ' 失败 [' + base + ']: ' + err.message);
-              attempt++;
-              if (attempt >= 2) { // 每个镜像重试 2 次
-                pathIdx++;
-                attempt = 0;
-              }
-              return new Promise(function(r) { setTimeout(r, 400); }).then(next);
-            });
-        }
-        return next();
-      }
-
-      function loadResources() {
         var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 3000);
+        var shaTimeoutId = setTimeout(function () { if (controller) controller.abort(); }, 3000);
 
         fetch('https://api.github.com/repos/' + REPO + '/branches/' + BRANCH, {
           cache: 'no-store',
@@ -330,18 +312,37 @@
           return res.json();
         })
         .then(function (data) {
-          clearTimeout(timeoutId);
-          if (data && data.commit && data.commit.sha) {
-            currentSha = data.commit.sha;
-          }
+          clearTimeout(shaTimeoutId);
+          if (data && data.commit && data.commit.sha) currentSha = data.commit.sha;
         })
         .catch(function (err) {
-          clearTimeout(timeoutId);
-          console.warn('获取 SHA 失败，使用 Fallback');
+          clearTimeout(shaTimeoutId);
+          console.warn('获取最新 SHA 失败，使用 Fallback');
         })
         .finally(function () {
           doLoadAssets();
         });
+      }
+
+      function fetchWithFallback(file) {
+        var pathIdx = 0, attempt = 0;
+        function next() {
+          if (pathIdx >= MIRRORS.length) return Promise.reject(new Error('所有镜像失败'));
+          var base = MIRRORS[pathIdx];
+          var url = base + REPO + '@' + currentSha + GAME_PATH + file;
+          
+          return fetch(url, { mode: 'cors', credentials: 'omit' })
+            .then(function(res) {
+              if (!res.ok) throw new Error('HTTP ' + res.status);
+              return res.blob();
+            })
+            .catch(function(err) {
+              attempt++;
+              if (attempt >= 2) { pathIdx++; attempt = 0; }
+              return new Promise(function(r) { setTimeout(r, 200); }).then(next);
+            });
+        }
+        return next();
       }
 
       function doLoadAssets() {
@@ -365,7 +366,7 @@
               });
             })
             .catch(function(err) {
-              loadErrors.push(a.file + ': ' + err.message);
+              loadErrors.push(a.file);
             });
         });
 
@@ -375,8 +376,7 @@
               var reader = new FileReader();
               reader.onload = function(e) {
                 var text = e.target.result;
-                var regex = /"([^"]+)"/g;
-                var match, parsed = [];
+                var regex = /"([^"]+)"/g, match, parsed = [];
                 while ((match = regex.exec(text)) !== null) {
                   if (match[1] && match[1].trim()) parsed.push(match[1].trim());
                 }
@@ -386,27 +386,37 @@
               reader.readAsText(blob);
             });
           })
-          .catch(function() { /* 忽略 reads 的错误 */ });
+          .catch(function() {});
 
-        Promise.all(loadPromises.concat([saysPromise])).then(function() {
-          if (loadErrors.length > 0) {
-            showError('贴图网络加载失败，已降级为纯色。\n' + loadErrors.join('\n'));
-          }
-        });
+        Promise.all(loadPromises.concat([saysPromise])).then(onAssetsFinished);
       }
 
-      // ================= 剧情控制 =================
+      function onAssetsFinished() {
+        if (localResLoaded) return;
+        if (globalTimeoutId) { clearTimeout(globalTimeoutId); globalTimeoutId = 0; }
+        localResLoaded = true;
+        
+        if (loadErrors.length > 0) {
+          showError('贴图网络加载失败，已降级为纯色。\n' + loadErrors.join(', '));
+        }
+        api.send({ t: 'fort:res:ready' });
+        checkStorySync();
+      }
+
+      function showError(msg) {
+        if (!dom.errPopup) return;
+        dom.errPopup.style.display = 'block';
+        dom.errPopup.textContent = msg;
+        console.error(msg);
+      }
+
+      // ================= 剧情与状态同步 =================
       function showNextStory() {
         if (storyAnimating || gameStarted || localStoryReady) return;
 
         if (storyFinished) {
           localStoryReady = true;
-          if (dom.storyText) {
-            dom.storyText.textContent = '等待对方完成剧情...';
-            dom.storyText.style.opacity = '1';
-          }
           if (dom.storyHint) dom.storyHint.style.display = 'none';
-          
           checkStorySync();
           api.send({ t: 'fort:story:ready' });
           return;
@@ -435,16 +445,32 @@
       }
 
       function checkStorySync() {
-        if (localStoryReady && peerStoryReady) {
-          if (dom.storyOverlay) dom.storyOverlay.style.display = 'none';
-          startRealGame();
-        } else if (localStoryReady && !peerStoryReady) {
+        // 1. 如果本地剧情没完，什么都不做
+        if (!localStoryReady) return;
+
+        // 2. 本地剧情已完，对方没完
+        if (!peerStoryReady) {
           if (dom.storyText) {
             dom.storyText.textContent = '等待对方完成剧情...';
             dom.storyText.style.opacity = '1';
           }
           if (dom.storyHint) dom.storyHint.style.display = 'none';
+          return;
         }
+
+        // 3. 双方剧情都已完，检查资源状态
+        if (!localResLoaded || !peerResLoaded) {
+          if (dom.storyText) {
+            dom.storyText.textContent = '加载资源中...';
+            dom.storyText.style.opacity = '1';
+          }
+          if (dom.storyHint) dom.storyHint.style.display = 'none';
+          return;
+        }
+
+        // 4. 万事俱备，进入游戏
+        if (dom.storyOverlay) dom.storyOverlay.style.display = 'none';
+        startRealGame();
       }
 
       function startRealGame() {
@@ -458,6 +484,8 @@
 
       function onStoryClick() {
         if (!mounted || gameStarted) return;
+        // 只有在未加载完毕、且剧情已经点完的情况下才允许点击跳过
+        if (storyFinished && localStoryReady) return; 
         showNextStory();
       }
 
@@ -844,7 +872,6 @@
         var NEAR = CFG.NEAR;
         var h = CFG.HALF;
 
-        // 如果 map 没加载出来，用 canvas 画个纯色图代替
         if (!images.map) {
           var tmpCv = document.createElement('canvas');
           tmpCv.width = tmpCv.height = 16;
@@ -984,7 +1011,6 @@
 
           var img = face.texture ? images[face.texture] : null;
           
-          // 如果对应的贴图缺失，用 canvas 画个纯色代替
           if (!img) {
             var tc = document.createElement('canvas');
             tc.width = tc.height = 2;
@@ -996,7 +1022,7 @@
             else tcx.fillStyle = '#333';
             tcx.fillRect(0,0,2,2);
             img = tc;
-            if (face.texture) images[face.texture] = img; // 缓存
+            if (face.texture) images[face.texture] = img;
           }
 
           if (img && face.uvs) {
@@ -1198,7 +1224,8 @@
           mounted = true;
           stage = container;
 
-          loadResources();
+          // 开始加载资源
+          startResourceLoading();
 
           var style = document.createElement('style');
           style.innerHTML = `
@@ -1354,6 +1381,7 @@
           if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
           if (storyTimeoutId) { clearTimeout(storyTimeoutId); storyTimeoutId = 0; }
           if (spaceTimer) { clearTimeout(spaceTimer); spaceTimer = 0; }
+          if (globalTimeoutId) { clearTimeout(globalTimeoutId); globalTimeoutId = 0; }
 
           if (canvas) {
             canvas.removeEventListener('pointerdown', onCanvasPointerDown);
@@ -1388,6 +1416,11 @@
             switch (t) {
               case 'fort:story:ready':
                 peerStoryReady = true;
+                checkStorySync();
+                break;
+
+              case 'fort:res:ready':
+                peerResLoaded = true;
                 checkStorySync();
                 break;
 
