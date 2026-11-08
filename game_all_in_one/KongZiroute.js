@@ -29,6 +29,16 @@
       };
       CFG.JUMP_V = Math.sqrt(2 * CFG.GRAVITY * CFG.JUMP_H);
 
+      // ================= 资源仓库配置 =================
+      var REPO = 'foobar650/YQ_resources';
+      var BRANCH = 'master';
+      var FALLBACK_SHA = 'b004eae7e2e52f9228ff6485dc114e3b9fe6f800';
+      var CDN_BASE = 'https://cdn.jsdmirror.com/gh/' + REPO + '@';
+      var GAME_PATH = '/game_all_in_one/KZR_res/';
+
+      var currentSha = FALLBACK_SHA;
+      var images = {};
+
       // ================= 状态变量 =================
       var mounted = false;
       var stage = null, canvas = null, ctx = null;
@@ -59,9 +69,6 @@
         "八佾舞于庭，是可忍也，孰不可忍也？",
         "乡愿，德之贼也。"
       ];
-
-      // 资源字典
-      var images = {};
 
       // 剧情状态
       var storyTexts = api.isHost ? [
@@ -279,11 +286,68 @@
         ctx.restore();
       }
 
+      // ================= 图片资源加载 =================
+      function loadResources() {
+        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 2000);
+
+        // 先去 GitHub API 拿最新 SHA
+        fetch('https://api.github.com/repos/' + REPO + '/branches/' + BRANCH, {
+          cache: 'no-store',
+          headers: { Accept: 'application/vnd.github+json' },
+          signal: controller ? controller.signal : undefined
+        })
+        .then(function (res) {
+          if (!res.ok) throw new Error('API error');
+          return res.json();
+        })
+        .then(function (data) {
+          clearTimeout(timeoutId);
+          if (data && data.commit && data.commit.sha) {
+            currentSha = data.commit.sha;
+          }
+        })
+        .catch(function (err) {
+          clearTimeout(timeoutId);
+          console.warn('获取最新 SHA 失败，使用 fallback SHA:', err);
+        })
+        .finally(function () {
+          // 无论成败，都去加载图片
+          doLoadImages();
+        });
+      }
+
+      function doLoadImages() {
+        var baseUrl = CDN_BASE + currentSha + GAME_PATH;
+
+        function loadImg(name, file) {
+          var img = new Image();
+          img.crossOrigin = 'Anonymous';
+          img.onload = function () {
+            images[name] = img;
+          };
+          img.onerror = function () {
+            // 如果最新 SHA 加载失败（可能是 jsdmirror 还没同步），回退到 fallback SHA
+            if (currentSha !== FALLBACK_SHA) {
+              console.warn('最新 SHA 图片加载失败，尝试 Fallback SHA: ' + file);
+              img.src = CDN_BASE + FALLBACK_SHA + GAME_PATH + file;
+            } else {
+              console.error('图片加载最终失败: ' + file);
+            }
+          };
+          img.src = baseUrl + file;
+        }
+
+        loadImg('kongzi', 'kongzi.jpg');
+        loadImg('wantong', 'wantong.jpg');
+        loadImg('map', 'map.webp');
+        loadImg('larou', 'larou.jpg');
+      }
+
       // ================= 剧情控制 =================
       function showNextStory() {
         if (storyAnimating || gameStarted || localStoryReady) return;
 
-        // 如果剧情已经全部播完，再次点击则进入等待/开始逻辑
         if (storyFinished) {
           localStoryReady = true;
           if (dom.storyText) {
@@ -1055,28 +1119,8 @@
           mounted = true;
           stage = container;
 
-          var baseDir = '';
-          if (api.buildResourceUrl) {
-            var testUrl = api.buildResourceUrl('test');
-            baseDir = testUrl.substring(0, testUrl.lastIndexOf('/') + 1);
-          } else if (document.currentScript && document.currentScript.src) {
-            var scriptUrl = document.currentScript.src;
-            baseDir = scriptUrl.substring(0, scriptUrl.lastIndexOf('/') + 1);
-          }
-          
-          function loadImage(name, url) {
-            if (!url) return;
-            var img = new Image();
-            img.crossOrigin = 'Anonymous';
-            img.onload = function() { images[name] = img; };
-            img.onerror = function() { console.log('Image failed: ' + url); };
-            img.src = url;
-          }
-          
-          loadImage('kongzi', baseDir + 'kongzi.jpg');
-          loadImage('wantong', baseDir + 'wantong.jpg');
-          loadImage('map', baseDir + 'map.webp');
-          loadImage('larou', baseDir + 'larou.jpg');
+          // 在这里调用异步加载资源
+          loadResources();
 
           var style = document.createElement('style');
           style.innerHTML = `
