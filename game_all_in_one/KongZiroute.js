@@ -5,7 +5,7 @@
   if (!window.GameRegistry) return;
 
   window.GameRegistry.register('fort-battle', {
-    name: 'Fort Battle',
+    name: '踏入孔府',
     icon: '🧱',
     desc: '双人实时射击与搭建掩体，破坏对方护甲',
     create: function (api) {
