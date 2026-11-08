@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebRTC 手动信令 · 跨设备 P2P 游戏</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: #0d1117; color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px; line-height: 1.6;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .topbar h1 { font-size: 17px; margin: 0; font-weight: 600; color: #e6edf3; }
+  .badge { padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .5px; white-space: nowrap; }
+  .badge.off { background: #3d1418; color: #f85149; border: 1px solid #f85149; }
+  .badge.on  { background: #0f2f16; color: #3fb950; border: 1px solid #3fb950; }
+
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .card h2 { font-size: 14px; margin: 0 0 10px; color: #58a6ff; font-weight: 600; }
+  .hint { font-size: 12px; color: #8b949e; margin: 8px 0 0; }
+  .hint.warn { color: #d29922; }
+
+  textarea {
+    width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
+    padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px; line-height: 1.45; resize: vertical; margin: 8px 0; word-break: break-all;
+  }
+  textarea:focus { outline: none; border-color: #58a6ff; }
+
+  button {
+    background: #238636; color: #fff; border: 1px solid #2ea043; padding: 7px 16px; border-radius: 6px;
+    cursor: pointer; font-size: 13px; font-family: inherit; transition: filter .12s ease;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.18); }
+  button:active:not(:disabled) { filter: brightness(.9); }
+  button:disabled { background: #21262d; border-color: #30363d; color: #6e7681; cursor: not-allowed; }
+  button.copy { background: #1f6feb; border-color: #388bfd; }
+  button.danger { background: #4a1d20; border-color: #f85149; color: #ff7b72; }
+
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .stat { font-size: 12px; color: #8b949e; font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+
+  #log {
+    background: #010409; border: 1px solid #30363d; border-radius: 6px; height: 280px; overflow-y: auto;
+    padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px; line-height: 1.55;
+  }
+  .log-line { white-space: pre-wrap; word-break: break-word; }
+  .log-line .ts { color: #6e7681; margin-right: 6px; }
+  .log-send .msg { color: #4da3ff; }
+  .log-recv .msg { color: #3fb950; }
+  .log-sys  .msg { color: #d29922; }
+  .log-err  .msg { color: #f85149; }
+  .log-info .msg { color: #8b949e; }
+
+  .select-panel { display: none; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; }
+  .select-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .select-title { font-size: 15px; font-weight: 600; color: #e6edf3; }
+  .select-hint { font-size: 12px; color: #8b949e; margin: 10px 0 16px; }
+  .game-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+  .game-card {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left;
+    background: #0d1117; border: 1px solid #30363d; border-radius: 10px; padding: 16px;
+    color: #e6edf3; cursor: pointer; font-family: inherit; font-size: 14px;
+    transition: border-color .15s ease, transform .12s ease, background .15s ease;
+  }
+  .game-card:hover:not(:disabled) { border-color: #58a6ff; background: #101722; transform: translateY(-2px); filter: none; }
+  .game-card:active:not(:disabled) { transform: translateY(0); }
+  .game-card-icon { font-size: 26px; line-height: 1; }
+  .game-card-name { font-size: 15px; font-weight: 600; }
+  .game-card-desc { font-size: 12px; color: #8b949e; font-weight: 400; }
+
+  .game-panel { display: none; flex-direction: column; gap: 12px; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px; }
+  .game-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .game-title { font-size: 15px; font-weight: 600; color: #e6edf3; }
+  .role {
+    font-size: 12px; padding: 3px 12px; border-radius: 999px; background: #21262d; color: #8b949e; white-space: nowrap;
+  }
+  .role.host  { background: #0d2340; color: #58a6ff; border: 1px solid #1f6feb; }
+  .role.guest { background: #0f2f16; color: #3fb950; border: 1px solid #2ea043; }
+  .role.turn  { background: #1f6feb; color: #fff; border: 1px solid #388bfd; }
+  .role.wait  { background: #3d2e0a; color: #d29922; border: 1px solid #bb8009; }
+  .role.over  { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+
+  .game-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: #8b949e; }
+
+  .game-canvas {
+    display: block; width: 100%; height: auto; background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  .pong-canvas { aspect-ratio: 8 / 5; cursor: crosshair; }
+  .bs-canvas   { aspect-ratio: 800 / 820; cursor: pointer; }
+
+  .bs-subpanel { display: none; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 14px; }
+  .bs-subpanel h3 { margin: 0 0 8px; font-size: 14px; color: #58a6ff; font-weight: 600; }
+  .bs-subpanel p { margin: 0 0 8px; }
+  .bs-config-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: #8b949e; flex-wrap: wrap; }
+  .bs-input {
+    width: 68px; background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 5px;
+    padding: 5px 8px; font-size: 13px; font-family: inherit;
+  }
+  .bs-input:focus { outline: none; border-color: #58a6ff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <h1>WebRTC 手动信令 · 跨设备 P2P 游戏</h1>
+    <span id="statusBadge" class="badge off">未连接</span>
+  </div>
+
+  <!-- 信令区 -->
+  <div id="signalArea">
+    <section class="card">
+      <h2>① 发起方：生成 Offer</h2>
+      <button id="btnCreateOffer" type="button">生成 Offer</button>
+      <textarea id="offerOut" rows="6" readonly placeholder="点击「生成 Offer」后，等 ICE 收集完成才会填充到这里…"></textarea>
+      <div class="row">
+        <button id="btnCopyOffer" class="copy" type="button">复制 Offer</button>
+        <span id="offerStat" class="stat">字符数 0 ｜ 候选 0</span>
+      </div>
+      <p class="hint">完整 SDP 约 1~3KB 属于正常体积，请整段复制，不要裁剪。</p>
+    </section>
+
+    <section class="card">
+      <h2>② 应答方：粘贴 Offer 并生成 Answer</h2>
+      <textarea id="offerIn" rows="6" placeholder="把发起方发来的完整 Offer JSON 粘贴到这里…"></textarea>
+      <button id="btnCreateAnswer" type="button">生成 Answer</button>
+      <textarea id="answerOut" rows="6" readonly placeholder="生成后，等 ICE 收集完成才会填充到这里…"></textarea>
+      <div class="row">
+        <button id="btnCopyAnswer" class="copy" type="button">复制 Answer</button>
+        <span id="answerStat" class="stat">字符数 0 ｜ 候选 0</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>③ 发起方：粘贴 Answer 并完成连接</h2>
+      <textarea id="answerIn" rows="6" placeholder="把应答方发回的完整 Answer JSON 粘贴到这里…"></textarea>
+      <button id="btnApplyAnswer" type="button">应用 Answer</button>
+      <p class="hint warn">收到 Answer 后应尽快粘贴应用，避免 ICE 凭据过期。</p>
+    </section>
+
+    <section class="card">
+      <h2>④ 数据通道日志</h2>
+      <div id="log"></div>
+    </section>
+  </div>
+
+  <!-- 游戏选择 -->
+  <section id="gameSelectArea" class="select-panel">
+    <div class="select-top">
+      <span class="select-title">🎮 选择游戏</span>
+      <button id="btnHangupSelect" class="danger" type="button">断开连接</button>
+    </div>
+    <p class="select-hint">选择后对方会自动加入同一游戏。发起方为主机，应答方为客机。</p>
+    <div id="gameGrid" class="game-grid"></div>
+  </section>
+
+  <!-- 游戏外壳 -->
+  <section id="gameShell" class="game-panel">
+    <div class="game-top">
+      <span class="game-title" id="gameTitle">—</span>
+      <span class="role" id="gameStatus">—</span>
+      <button id="btnGameHangup" class="danger" type="button">断开连接</button>
+    </div>
+    <div id="gameBody"></div>
+    <div class="game-foot">
+      <span id="gameHint">—</span>
+    </div>
+  </section>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============================================================
+   * 配置：改仓库/分支只动这里
+   * ============================================================ */
+  var CDN_BASE = 'https://cdn.jsdmirror.com/gh/foobar650/YQ_resources@master/game_all_in_one/';
+
+  /* ============================================================
+   * DOM
+   * ============================================================ */
+  var logEl        = document.getElementById('log');
+  var statusBadge  = document.getElementById('statusBadge');
+  var signalArea   = document.getElementById('signalArea');
+  var gameSelectArea = document.getElementById('gameSelectArea');
+  var gameShell    = document.getElementById('gameShell');
+  var gameGrid     = document.getElementById('gameGrid');
+  var gameTitle    = document.getElementById('gameTitle');
+  var gameStatus   = document.getElementById('gameStatus');
+  var gameHint     = document.getElementById('gameHint');
+  var gameBody     = document.getElementById('gameBody');
+  var btnHangupSelect = document.getElementById('btnHangupSelect');
+  var btnGameHangup   = document.getElementById('btnGameHangup');
+
+  var btnCreateOffer = document.getElementById('btnCreateOffer');
+  var offerOut       = document.getElementById('offerOut');
+  var btnCopyOffer   = document.getElementById('btnCopyOffer');
+  var offerStat      = document.getElementById('offerStat');
+  var offerIn        = document.getElementById('offerIn');
+  var btnCreateAnswer= document.getElementById('btnCreateAnswer');
+  var answerOut      = document.getElementById('answerOut');
+  var btnCopyAnswer  = document.getElementById('btnCopyAnswer');
+  var answerStat     = document.getElementById('answerStat');
+  var answerIn       = document.getElementById('answerIn');
+  var btnApplyAnswer = document.getElementById('btnApplyAnswer');
+
+  /* ============================================================
+   * 全局状态
+   * ============================================================ */
+  var peerA = null, peerB = null;
+  var dc = null;
+  var myIsHost = null;
+  var activeGameId = null;
+  var activeController = null;
+
+  /* ============================================================
+   * 日志
+   * ============================================================ */
+  function log(message, type) {
+    type = type || 'sys';
+    var line = document.createElement('div');
+    line.className = 'log-line log-' + type;
+    var ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = '[' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ']';
+    var msg = document.createElement('span');
+    msg.className = 'msg';
+    msg.textContent = String(message);
+    line.appendChild(ts);
+    line.appendChild(msg);
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function setBadge(connected) {
+    if (connected) { statusBadge.textContent = '已连接'; statusBadge.className = 'badge on'; }
+    else { statusBadge.textContent = '未连接'; statusBadge.className = 'badge off'; }
+  }
+
+  /* ============================================================
+   * 游戏注册表
+   * ============================================================ */
+  window.GameRegistry = {
+    games: {},
+    order: [],
+    register: function (id, def) {
+      if (this.games[id]) return;
+      this.games[id] = def;
+      this.order.push(id);
+    },
+    get: function (id) { return this.games[id] || null; },
+    list: function () {
+      var self = this;
+      return this.order.map(function (id) { return self.games[id]; });
+    }
+  };
+
+  /* ============================================================
+   * 视图切换
+   * ============================================================ */
+  function showGameSelect() {
+    signalArea.style.display = 'none';
+    gameShell.style.display = 'none';
+    gameSelectArea.style.display = 'block';
+    setBadge(true);
+  }
+  function showGameShell() {
+    signalArea.style.display = 'none';
+    gameSelectArea.style.display = 'none';
+    gameShell.style.display = 'flex';
+    setBadge(true);
+  }
+  function backToSignal() {
+    gameShell.style.display = 'none';
+    gameSelectArea.style.display = 'none';
+    signalArea.style.display = '';
+    setBadge(false);
+  }
+
+  /* ============================================================
+   * 动态加载脚本
+   * ============================================================ */
+  function loadScript(url) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = url;
+      s.async = true;
+      s.onload = function () { resolve(); };
+      s.onerror = function () { reject(new Error('加载失败: ' + url)); };
+      document.head.appendChild(s);
+    });
+  }
+
+  async function bootstrap() {
+    try {
+      await loadScript(CDN_BASE + 'games-list.js');
+    } catch (e) {
+      log('加载 games-list.js 失败：' + e.message, 'err');
+      renderGameCards();
+      return;
+    }
+    var manifest = window.GAMES_MANIFEST || [];
+    for (var i = 0; i < manifest.length; i++) {
+      try {
+        await loadScript(CDN_BASE + manifest[i].file);
+      } catch (e) {
+        log('加载游戏 ' + manifest[i].file + ' 失败：' + e.message, 'err');
+      }
+    }
+    renderGameCards();
+  }
+
+  function renderGameCards() {
+    gameGrid.innerHTML = '';
+    var games = window.GameRegistry.list();
+    if (!games.length) {
+      var err = document.createElement('p');
+      err.className = 'hint warn';
+      err.textContent = '没有加载到任何游戏，请检查 CDN 是否可访问。';
+      gameGrid.appendChild(err);
+      return;
+    }
+    games.forEach(function (def) {
+      var btn = document.createElement('button');
+      btn.className = 'game-card';
+      btn.type = 'button';
+      var iconEl = document.createElement('span');
+      iconEl.className = 'game-card-icon';
+      iconEl.textContent = def.icon || '🎮';
+      var nameEl = document.createElement('span');
+      nameEl.className = 'game-card-name';
+      nameEl.textContent = def.name || '未命名';
+      var descEl = document.createElement('span');
+      descEl.className = 'game-card-desc';
+      descEl.textContent = def.desc || '';
+      btn.appendChild(iconEl);
+      btn.appendChild(nameEl);
+      btn.appendChild(descEl);
+      btn.addEventListener('click', function () { selectGame(def.id); });
+      gameGrid.appendChild(btn);
+    });
+  }
+
+  /* ============================================================
+   * 游戏生命周期
+   * ============================================================ */
+  function createApi() {
+    return {
+      isHost: myIsHost,
+      send: function (obj) {
+        if (!dc || dc.readyState !== 'open') return false;
+        try { dc.send(JSON.stringify(obj)); return true; }
+        catch (e) { log('发送失败：' + e.message, 'err'); return false; }
+      },
+      log: log,
+      setStatus: function (text, cls) {
+        gameStatus.textContent = text;
+        gameStatus.className = 'role' + (cls ? ' ' + cls : '');
+      },
+      setHint: function (text) {
+        gameHint.textContent = text || '';
+      }
+    };
+  }
+
+  function startGame(gameId) {
+    if (activeController) return;
+    var def = window.GameRegistry.get(gameId);
+    if (!def || typeof def.create !== 'function') {
+      log('未知游戏：' + gameId, 'err');
+      return;
+    }
+    activeGameId = gameId;
+    gameTitle.textContent = (def.icon || '🎮') + ' ' + (def.name || gameId);
+
+    var controller = def.create(createApi());
+    if (!controller || typeof controller.mount !== 'function') {
+      log('游戏 ' + gameId + ' 未返回有效 controller', 'err');
+      activeGameId = null;
+      return;
+    }
+    activeController = controller;
+
+    gameBody.innerHTML = '';
+    showGameShell();
+    try {
+      controller.mount(gameBody);
+    } catch (e) {
+      log('游戏 ' + gameId + ' 挂载失败：' + e.message, 'err');
+      stopGame();
+    }
+  }
+
+  function stopGame() {
+    if (activeController) {
+      try { activeController.unmount(); } catch (e) { /* 忽略 */ }
+    }
+    activeController = null;
+    activeGameId = null;
+    gameBody.innerHTML = '';
+    gameStatus.textContent = '—';
+    gameStatus.className = 'role';
+    gameHint.textContent = '—';
+  }
+
+  function selectGame(gameId) {
+    if (activeController) return;
+    if (!dc || dc.readyState !== 'open') {
+      log('数据通道未打开，无法选择游戏', 'err');
+      return;
+    }
+    try { dc.send(JSON.stringify({ t: 'select', game: gameId })); }
+    catch (e) { log('发送游戏选择失败：' + e.message, 'err'); return; }
+    log('已选择游戏：' + gameId, 'sys');
+    startGame(gameId);
+  }
+
+  /* ============================================================
+   * 消息路由
+   * ============================================================ */
+  function routeMessage(msg) {
+    if (!msg || typeof msg !== 'object') return;
+
+    // 游戏选择：未开局时响应
+    if (msg.t === 'select') {
+      if (!activeController) {
+        log('对方选择了游戏：' + msg.game, 'sys');
+        startGame(msg.game);
+      }
+      return;
+    }
+
+    // 游戏内消息：只转发给当前游戏
+    if (activeController) {
+      try { activeController.handleMessage(msg); }
+      catch (e) { log('游戏消息处理异常：' + e.message, 'err'); }
+    }
+  }
+
+  /* ============================================================
+   * 数据通道绑定
+   * ============================================================ */
+  function bindDC(channel, tag, isHost) {
+    dc = channel;
+    myIsHost = isHost;
+
+    channel.onopen = function () {
+      log('[' + tag + '] dc.onopen：数据通道已打开', 'sys');
+      log('本端角色：' + (isHost ? '主机（发起方）' : '客机（应答方）'), 'sys');
+      showGameSelect();
+    };
+
+    channel.onmessage = function (e) {
+      var msg;
+      try { msg = JSON.parse(e.data); }
+      catch (err) { log('[' + tag + '] 收到无法解析的消息，已忽略', 'err'); return; }
+      routeMessage(msg);
+    };
+
+    channel.onclose = function () {
+      log('[' + tag + '] dc.onclose：数据通道已关闭', 'sys');
+      stopGame();
+      backToSignal();
+    };
+
+    channel.onerror = function (e) {
+      var detail = (e && e.error && e.error.message) || (e && e.message) || '未知错误';
+      log('[' + tag + '] dc.onerror：' + detail, 'err');
+    };
+  }
+
+  /* ============================================================
+   * 等待 ICE 收集完成
+   * ============================================================ */
+  function waitIceComplete(pc, timeoutMs) {
+    timeoutMs = timeoutMs || 12000;
+    return new Promise(function (resolve) {
+      if (pc.iceGatheringState === 'complete') {
+        log('ICE 收集状态已是 complete，立即使用当前 SDP', 'info');
+        resolve(true);
+        return;
+      }
+      var done = false;
+      function finish(ok) {
+        if (done) return;
+        done = true;
+        pc.removeEventListener('icegatheringstatechange', onChange);
+        clearTimeout(timer);
+        resolve(ok);
+      }
+      function onChange() {
+        log('iceGatheringState 变化 -> ' + pc.iceGatheringState, 'info');
+        if (pc.iceGatheringState === 'complete') {
+          log('ICE 收集完成，SDP 已包含全部候选', 'sys');
+          finish(true);
+        }
+      }
+      pc.addEventListener('icegatheringstatechange', onChange);
+      var timer = setTimeout(function () {
+        log('警告：等待 ICE 收集超过 ' + (timeoutMs / 1000) + ' 秒仍未 complete，SDP 可能缺少候选，连接可能失败。', 'err');
+        finish(false);
+      }, timeoutMs);
+    });
+  }
+
+  /* ============================================================
+   * 创建 PeerConnection
+   * ============================================================ */
+  function createPeer(tag) {
+    var info = { tag: tag, pc: null, total: 0, cand: { host: 0, srflx: 0, prflx: 0, relay: 0 } };
+    // 如遇对称 NAT / 严格防火墙，需自行加入 TURN：
+    // { urls: 'turn:your.server:3478', username: 'user', credential: 'pass' }
+    var pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' }
+      ]
+    });
+    info.pc = pc;
+
+    pc.onicecandidate = function (e) {
+      if (!e.candidate) {
+        log('[' + tag + '] onicecandidate：候选收集结束', 'info');
+        return;
+      }
+      var c = e.candidate;
+      var type = c.type || 'unknown';
+      var proto = c.protocol || 'unknown';
+      info.total++;
+      if (typeof info.cand[type] !== 'number') info.cand[type] = 0;
+      info.cand[type]++;
+      log('[' + tag + '] 候选 #' + info.total + ' 类型=' + type + ' 协议=' + proto + ' 地址=' + (c.address || c.ip || '?') + ':' + c.port, 'info');
+      refreshStats();
+    };
+
+    pc.onicegatheringstatechange = function () {
+      log('[' + tag + '] iceGatheringState -> ' + pc.iceGatheringState, 'info');
+    };
+
+    pc.oniceconnectionstatechange = function () {
+      var s = pc.iceConnectionState;
+      log('[' + tag + '] iceConnectionState -> ' + s, s === 'failed' ? 'err' : 'sys');
+      if (s === 'failed' || s === 'disconnected') {
+        log('[' + tag + '] 提示：完整 SDP 已含全部候选，失败通常是 NAT/防火墙问题，需要 TURN 中继。', 'err');
+      }
+    };
+
+    pc.onconnectionstatechange = function () {
+      var s = pc.connectionState;
+      log('[' + tag + '] connectionState -> ' + s, s === 'failed' ? 'err' : 'sys');
+    };
+
+    return info;
+  }
+
+  function buildStatText(text, info) {
+    var chars = text ? text.length : 0;
+    if (!info) return '字符数 ' + chars + ' ｜ 候选 0 (host:0 srflx:0 prflx:0 relay:0)';
+    var c = info.cand;
+    return '字符数 ' + chars + ' ｜ 候选 ' + info.total
+      + ' (host:' + (c.host || 0) + ' srflx:' + (c.srflx || 0)
+      + ' prflx:' + (c.prflx || 0) + ' relay:' + (c.relay || 0) + ')';
+  }
+  function refreshStats() {
+    offerStat.textContent  = buildStatText(offerOut.value, peerA);
+    answerStat.textContent = buildStatText(answerOut.value, peerB);
+  }
+
+  /* ============================================================
+   * 复制到剪贴板
+   * ============================================================ */
+  function copyToClipboard(text, btn, label) {
+    if (!text) { log('没有可复制的内容，请先生成 SDP', 'err'); return; }
+    function flash(ok) {
+      var old = btn.textContent;
+      btn.textContent = ok ? '已复制 ✓' : '复制失败';
+      setTimeout(function () { btn.textContent = old; }, 1200);
+    }
+    function fallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        var ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        flash(ok);
+        if (ok) log(label + ' 已复制到剪贴板（回退方式）', 'sys');
+        else log(label + ' 复制失败，请手动全选文本框内容复制', 'err');
+      } catch (e2) {
+        log(label + ' 复制失败：' + e2.message + '，请手动全选文本框内容复制', 'err');
+      }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        flash(true); log(label + ' 已复制到剪贴板', 'sys');
+      }).catch(function (err) {
+        log('navigator.clipboard 写入失败（' + err.message + '），尝试回退方案…', 'sys');
+        fallback();
+      });
+    } else {
+      log('当前环境不支持 navigator.clipboard，使用回退方案…', 'sys');
+      fallback();
+    }
+  }
+
+  function closePeer(info) {
+    if (!info || !info.pc) return;
+    try { info.pc.close(); } catch (e) { /* 忽略 */ }
+  }
+
+  /* ============================================================
+   * ① 生成 Offer
+   * ============================================================ */
+  btnCreateOffer.addEventListener('click', function () {
+    (async function () {
+      try {
+        if (peerA) { closePeer(peerA); peerA = null; dc = null; stopGame(); backToSignal(); }
+        offerOut.value = '';
+        offerStat.textContent = buildStatText('', null);
+
+        peerA = createPeer('发起方');
+        var pc = peerA.pc;
+
+        // 非协商模式：只有发起方 createDataChannel，应答方靠 ondatachannel 接收。
+        var channel = pc.createDataChannel('game', { ordered: true });
+        log('已创建数据通道（非协商模式，label=game）', 'sys');
+        bindDC(channel, '发起方', true);
+
+        var offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        log('已设置本地描述（offer），开始等待 ICE 收集完成…', 'sys');
+        await waitIceComplete(pc, 12000);
+
+        offerOut.value = JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp });
+        refreshStats();
+        log('Offer 已生成，长度 ' + offerOut.value.length + ' 字符', 'sys');
+      } catch (err) {
+        log('生成 Offer 失败：' + err.message, 'err');
+      }
+    })();
+  });
+
+  /* ============================================================
+   * ② 生成 Answer
+   * ============================================================ */
+  btnCreateAnswer.addEventListener('click', function () {
+    (async function () {
+      try {
+        var raw = offerIn.value.trim();
+        if (!raw) { log('请先粘贴 Offer JSON', 'err'); return; }
+        var offerDesc;
+        try { offerDesc = JSON.parse(raw); }
+        catch (e) { log('JSON.parse 失败：' + e.message, 'err'); return; }
+        if (!offerDesc || !offerDesc.sdp || offerDesc.type !== 'offer') {
+          log('不是合法的 offer', 'err'); return;
+        }
+        if (peerB) { closePeer(peerB); peerB = null; dc = null; stopGame(); backToSignal(); }
+        answerOut.value = '';
+        answerStat.textContent = buildStatText('', null);
+
+        peerB = createPeer('应答方');
+        var pc = peerB.pc;
+
+        // 应答方绝不调用 createDataChannel，只通过 ondatachannel 接收。
+        pc.ondatachannel = function (e) {
+          log('应答方收到远端数据通道：label=' + e.channel.label, 'sys');
+          bindDC(e.channel, '应答方', false);
+        };
+
+        // 顺序不能反：先 setRemoteDescription(offer)，再 createAnswer。
+        await pc.setRemoteDescription(new RTCSessionDescription(offerDesc));
+        log('已设置远端描述（offer）', 'sys');
+
+        var answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        log('已设置本地描述（answer），开始等待 ICE 收集完成…', 'sys');
+        await waitIceComplete(pc, 12000);
+
+        answerOut.value = JSON.stringify({ type: 'answer', sdp: pc.localDescription.sdp });
+        refreshStats();
+        log('Answer 已生成，长度 ' + answerOut.value.length + ' 字符', 'sys');
+      } catch (err) {
+        log('生成 Answer 失败：' + err.message, 'err');
+      }
+    })();
+  });
+
+  /* ============================================================
+   * ③ 应用 Answer
+   * ============================================================ */
+  btnApplyAnswer.addEventListener('click', function () {
+    (async function () {
+      try {
+        if (!peerA || !peerA.pc) { log('当前还没有创建 Offer，请先执行第 ① 步', 'err'); return; }
+        var raw = answerIn.value.trim();
+        if (!raw) { log('请先粘贴 Answer JSON', 'err'); return; }
+        var answerDesc;
+        try { answerDesc = JSON.parse(raw); }
+        catch (e) { log('JSON.parse 失败：' + e.message, 'err'); return; }
+        if (!answerDesc || !answerDesc.sdp || answerDesc.type !== 'answer') {
+          log('不是合法的 answer', 'err'); return;
+        }
+        await peerA.pc.setRemoteDescription(new RTCSessionDescription(answerDesc));
+        log('已应用远端 Answer，等待 ICE 连接建立…', 'sys');
+        log('提示：收到 Answer 后应尽快粘贴应用，避免 ICE 凭据过期。', 'sys');
+      } catch (err) {
+        log('应用 Answer 失败：' + err.message, 'err');
+      }
+    })();
+  });
+
+  btnCopyOffer.addEventListener('click', function () { copyToClipboard(offerOut.value, btnCopyOffer, 'Offer'); });
+  btnCopyAnswer.addEventListener('click', function () { copyToClipboard(answerOut.value, btnCopyAnswer, 'Answer'); });
+
+  /* ============================================================
+   * 断开
+   * ============================================================ */
+  function hangup() {
+    log('用户主动断开连接', 'sys');
+    try { if (dc) dc.close(); } catch (e) { /* 忽略 */ }
+    dc = null;
+    if (peerA) { closePeer(peerA); peerA = null; }
+    if (peerB) { closePeer(peerB); peerB = null; }
+    stopGame();
+    backToSignal();
+  }
+  btnHangupSelect.addEventListener('click', hangup);
+  btnGameHangup.addEventListener('click', hangup);
+
+  window.addEventListener('beforeunload', function () {
+    try { if (dc) dc.close(); } catch (e) { /* 忽略 */ }
+    try { if (peerA && peerA.pc) peerA.pc.close(); } catch (e) { /* 忽略 */ }
+    try { if (peerB && peerB.pc) peerB.pc.close(); } catch (e) { /* 忽略 */ }
+  });
+
+  /* ============================================================
+   * 初始化
+   * ============================================================ */
+  refreshStats();
+  setBadge(false);
+  gameSelectArea.style.display = 'none';
+  gameShell.style.display = 'none';
+  log('页面已就绪。信令流程：① 发起方生成 Offer → ② 应答方粘贴 Offer 生成 Answer → ③ 发起方粘贴 Answer 完成连接。', 'sys');
+  log('连接建立后进入游戏选择界面，任一方选择游戏，双方自动加入。', 'sys');
+  bootstrap();
+})();
+</script>
+</body>
+</html>
