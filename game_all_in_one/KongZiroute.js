@@ -1,13 +1,12 @@
 (function () {
   'use strict';
 
-  // 防止多次注册
   if (!window.GameRegistry) return;
 
   window.GameRegistry.register('fort-battle', {
     name: 'Fort Battle',
     icon: '🧱',
-    desc: '双人实时射击与搭建掩体，破坏对方护甲',
+    desc: '孔子与学生的礼乐之争',
     create: function (api) {
       // ================= 常量配置 =================
       var CFG = {
@@ -30,6 +29,25 @@
       };
       CFG.JUMP_V = Math.sqrt(2 * CFG.GRAVITY * CFG.JUMP_H);
 
+      // ================= 剧情配置 =================
+      var storyLines = api.isHost ? [
+        '你是孔子',
+        '有一个不尊重礼乐的差生要来拜访你并想进入孔府',
+        '你的任务是劝解学生放弃念头，同时躲避学生发来的腊肉',
+        '为了礼乐，尽力劝解学生吧!'
+      ] : [
+        '你是一个有钱的学生，无所事事的你突然想进入孔府看看',
+        '但是孔子貌似不想让你进入孔府',
+        '你的任务是在躲避孔子的劝解的同时，向孔子发射腊肉',
+        'Just Do IT!'
+      ];
+      
+      var storyIndex = 0;
+      var storyPhase = 'playing'; // 'playing', 'waiting'
+      var foeStoryDone = false;
+      var gameStarted = false;
+      var isTransitioning = false;
+
       // ================= 状态变量 =================
       var mounted = false;
       var stage = null, canvas = null, ctx = null;
@@ -38,8 +56,8 @@
       var localId = api.isHost ? 0 : 1;
       var remoteId = 1 - localId;
 
-      var buildings = {}; // id -> {id,x,y,z,axis,type,aabb,hp}
-      var projectiles = {}; // id -> {id,owner,x,y,z,vx,vy,vz,life}
+      var buildings = {};
+      var projectiles = {};
       var seq = 0, fireCd = 0, buildCd = 0, netAcc = 0;
       var gameOver = false;
       var introActive = false;
@@ -50,15 +68,13 @@
       var actBtn = { fire: false, build: false, jump: false };
       var lookPointer = { id: -1, x: 0, y: 0 };
       
-      // 玩家状态（脚底中心）
       var me = { id: localId, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, yaw: 0, pitch: 0, hp: CFG.MAX_HP, onGround: true };
       var foe = { id: remoteId, x: 0, y: 0, z: 0, yaw: 0, hp: CFG.MAX_HP };
       var foeNet = { x: 0, y: 0, z: 0, yaw: 0 };
 
-      // 注入的 DOM 引用
       var dom = {};
 
-      // ================= 数学与几何工具 =================
+      // ================= 工具函数 =================
       function wrapAngle(a) {
         if (!isFinite(a)) return 0;
         var TAU = Math.PI * 2;
@@ -94,27 +110,21 @@
       function rayAABB(ox, oy, oz, dx, dy, dz, box) {
         var tmin = 0, tmax = 1000;
         var invD = 1 / (dx === 0 ? 1e-9 : dx);
-        var t1 = (box.minx - ox) * invD;
-        var t2 = (box.maxx - ox) * invD;
+        var t1 = (box.minx - ox) * invD, t2 = (box.maxx - ox) * invD;
         if (t1 > t2) { var tt = t1; t1 = t2; t2 = tt; }
-        if (t1 > tmin) tmin = t1;
-        if (t2 < tmax) tmax = t2;
+        if (t1 > tmin) tmin = t1; if (t2 < tmax) tmax = t2;
         if (tmin > tmax) return null;
 
         invD = 1 / (dy === 0 ? 1e-9 : dy);
-        t1 = (box.miny - oy) * invD;
-        t2 = (box.maxy - oy) * invD;
+        t1 = (box.miny - oy) * invD; t2 = (box.maxy - oy) * invD;
         if (t1 > t2) { var tt = t1; t1 = t2; t2 = tt; }
-        if (t1 > tmin) tmin = t1;
-        if (t2 < tmax) tmax = t2;
+        if (t1 > tmin) tmin = t1; if (t2 < tmax) tmax = t2;
         if (tmin > tmax) return null;
 
         invD = 1 / (dz === 0 ? 1e-9 : dz);
-        t1 = (box.minz - oz) * invD;
-        t2 = (box.maxz - oz) * invD;
+        t1 = (box.minz - oz) * invD; t2 = (box.maxz - oz) * invD;
         if (t1 > t2) { var tt = t1; t1 = t2; t2 = tt; }
-        if (t1 > tmin) tmin = t1;
-        if (t2 < tmax) tmax = t2;
+        if (t1 > tmin) tmin = t1; if (t2 < tmax) tmax = t2;
         if (tmin > tmax) return null;
 
         return tmin;
@@ -126,26 +136,16 @@
                a.minz < b.maxz - 1e-6 && a.maxz > b.minz + 1e-6;
       }
 
-      // ================= 渲染工具 =================
       function makeCamera(pos, yaw, pitch) {
         var cy = Math.cos(yaw), sy = Math.sin(yaw);
         var cp = Math.cos(pitch), sp = Math.sin(pitch);
-        return {
-          pos: pos,
-          right: [cy, 0, -sy],
-          up: [sy * sp, cp, cy * sp],
-          forward: [-sy * cp, sp, -cy * cp]
-        };
+        return { pos: pos, right: [cy, 0, -sy], up: [sy * sp, cp, cy * sp], forward: [-sy * cp, sp, -cy * cp] };
       }
 
       function camSpace(p, cam) {
         var rx = p[0] - cam.pos[0], ry = p[1] - cam.pos[1], rz = p[2] - cam.pos[2];
         var r = cam.right, u = cam.up, f = cam.forward;
-        return [
-          rx * r[0] + ry * r[1] + rz * r[2],
-          rx * u[0] + ry * u[1] + rz * u[2],
-          rx * f[0] + ry * f[1] + rz * f[2]
-        ];
+        return [rx * r[0] + ry * r[1] + rz * r[2], rx * u[0] + ry * u[1] + rz * u[2], rx * f[0] + ry * f[1] + rz * f[2]];
       }
 
       function proj(v, focal, W, H) {
@@ -211,7 +211,39 @@
         return faces;
       }
 
-      // ================= 游戏逻辑 =================
+      // ================= 核心逻辑 =================
+      function checkStartGame() {
+        if (storyPhase === 'waiting' && foeStoryDone && !gameStarted) {
+          gameStarted = true;
+          if (dom.story) dom.story.style.display = 'none';
+          if (dom.hud) dom.hud.style.display = 'block'; // 剧情结束显示 HUD
+          resetState(); // 初始化游戏状态，显示“请输入文本”
+        }
+      }
+
+      function onStoryClick() {
+        if (storyPhase !== 'playing' || isTransitioning || !mounted) return;
+        isTransitioning = true;
+        if (dom.storyText) dom.storyText.style.opacity = 0;
+
+        setTimeout(function () {
+          storyIndex++;
+          if (storyIndex >= storyLines.length) {
+            storyPhase = 'waiting';
+            if (dom.storyText) dom.storyText.innerHTML = '等待对方完成剧情...';
+            if (dom.storyHint) dom.storyHint.style.display = 'none';
+            api.send({ t: 'fort:storydone' });
+            checkStartGame();
+          } else {
+            if (dom.storyText) dom.storyText.innerHTML = storyLines[storyIndex];
+            // 强制 reflow 后重新设置透明度以便触发淡入
+            void dom.storyText.offsetWidth;
+            if (dom.storyText) dom.storyText.style.opacity = 1;
+          }
+          isTransitioning = false;
+        }, 300); // 等待 CSS 淡出完成
+      }
+
       function resetState() {
         me.x = 0; me.z = api.isHost ? 10 : -10; me.y = 0;
         me.vx = 0; me.vy = 0; me.vz = 0;
@@ -283,12 +315,9 @@
       }
 
       function removeBuilding(id) { delete buildings[id]; }
-
       function applyDamageToBuilding(id, dmg) {
-        var b = buildings[id];
-        if (!b) return;
-        b.hp -= dmg;
-        if (b.hp <= 0) removeBuilding(id);
+        var b = buildings[id]; if (!b) return;
+        b.hp -= dmg; if (b.hp <= 0) removeBuilding(id);
       }
 
       function blockedAt(x, z, y) {
@@ -299,9 +328,7 @@
           var a = buildings[id].aabb;
           if (pminx < a.maxx - 1e-4 && pmaxx > a.minx + 1e-4 &&
               pminy < a.maxy - 1e-4 && pmaxy > a.miny + 1e-4 &&
-              pminz < a.maxz - 1e-4 && pmaxz > a.minz + 1e-4) {
-            return true;
-          }
+              pminz < a.maxz - 1e-4 && pmaxz > a.minz + 1e-4) return true;
         }
         return false;
       }
@@ -323,9 +350,7 @@
         if (gameOver || introActive || fireCd > 0) return;
         fireCd = CFG.FIRE_CD;
         var cp = Math.cos(me.pitch);
-        var dx = -Math.sin(me.yaw) * cp;
-        var dy = Math.sin(me.pitch);
-        var dz = -Math.cos(me.yaw) * cp;
+        var dx = -Math.sin(me.yaw) * cp, dy = Math.sin(me.pitch), dz = -Math.cos(me.yaw) * cp;
         var ox = me.x + dx * 0.55, oy = me.y + CFG.EYE + dy * 0.55, oz = me.z + dz * 0.55;
         var id = localId + '_' + (++seq);
         projectiles[id] = { id: id, owner: localId, x: ox, y: oy, z: oz,
@@ -342,14 +367,11 @@
 
         var minT = 100, hitBld = null;
         if (dy < -0.001) {
-          var tG = -ey / dy;
-          if (tG < minT) minT = tG;
+          var tG = -ey / dy; if (tG < minT) minT = tG;
         }
         for (var bid in buildings) {
           var tB = rayAABB(me.x, ey, me.z, dx, dy, dz, buildings[bid].aabb);
-          if (tB !== null && tB > 0 && tB < minT) {
-            minT = tB; hitBld = buildings[bid];
-          }
+          if (tB !== null && tB > 0 && tB < minT) { minT = tB; hitBld = buildings[bid]; }
         }
 
         var hitPos, lenH = Math.sqrt(dx*dx + dz*dz);
@@ -381,16 +403,12 @@
         var axis = Math.abs(dx) > Math.abs(dz) ? 'x' : 'z';
         var w, h, d, type;
         if (isFlat) {
-          type = 'floor';
-          w = (axis === 'x') ? 2 : 1; d = (axis === 'x') ? 1 : 2; h = 0.1;
+          type = 'floor'; w = (axis === 'x') ? 2 : 1; d = (axis === 'x') ? 1 : 2; h = 0.1;
         } else {
-          type = 'wall';
-          w = (axis === 'x') ? 0.1 : 1; d = (axis === 'x') ? 1 : 0.1; h = 2;
+          type = 'wall'; w = (axis === 'x') ? 0.1 : 1; d = (axis === 'x') ? 1 : 0.1; h = 2;
         }
 
-        if (Math.abs(bx) > CFG.HALF - 1 || Math.abs(bz) > CFG.HALF - 1) {
-          api.setHint('超出地图范围'); return;
-        }
+        if (Math.abs(bx) > CFG.HALF - 1 || Math.abs(bz) > CFG.HALF - 1) { api.setHint('超出地图范围'); return; }
 
         var na = { minx: bx - w/2, maxx: bx + w/2, miny: baseY, maxy: baseY + h, minz: bz - d/2, maxz: bz + d/2 };
         var pme = { minx: me.x-CFG.PLAYER_R, maxx: me.x+CFG.PLAYER_R, miny: me.y, maxy: me.y+CFG.PLAYER_H, minz: me.z-CFG.PLAYER_R, maxz: me.z+CFG.PLAYER_R };
@@ -413,20 +431,13 @@
         me.hp = Math.max(0, me.hp - CFG.PROJ_DMG);
         updateHud();
         api.send({ t: 'fort:hit', proj: projId, hp: me.hp, by: localId });
-        if (me.hp <= 0) {
-          api.send({ t: 'fort:ko' });
-          endGame(false);
-        } else {
-          api.setHint('你被击中！剩余血量 ' + Math.round(me.hp));
-        }
+        if (me.hp <= 0) { api.send({ t: 'fort:ko' }); endGame(false); }
+        else { api.setHint('你被击中！剩余血量 ' + Math.round(me.hp)); }
       }
 
       function dieByFall() {
         if (gameOver) return;
-        me.hp = 0;
-        updateHud();
-        api.send({ t: 'fort:ko' });
-        endGame(false);
+        me.hp = 0; updateHud(); api.send({ t: 'fort:ko' }); endGame(false);
       }
 
       function endGame(win) {
@@ -434,15 +445,12 @@
         gameOver = true;
         api.setStatus(win ? '胜利' : '失败', 'over');
         api.setHint(win ? '你击败了对手！' : '你被击败了……');
-        
         if (dom.overlay) {
           dom.overTitle.textContent = win ? '胜利' : '失败';
           dom.overDesc.textContent = win ? '你击败了对手！' : '你被击败了……';
           dom.overlay.className = win ? 'fb-overlay fb-win fb-show' : 'fb-overlay fb-show';
         }
-        if (document.pointerLockElement === canvas) {
-          try { document.exitPointerLock(); } catch (e) {}
-        }
+        if (document.pointerLockElement === canvas) { try { document.exitPointerLock(); } catch (e) {} }
       }
 
       // ================= 帧更新 =================
@@ -465,13 +473,11 @@
         if (len > 1) { f /= len; s /= len; }
 
         var sy = Math.sin(me.yaw), cy = Math.cos(me.yaw);
-        var wx = -sy * f + cy * s;
-        var wz = -cy * f - sy * s;
+        var wx = -sy * f + cy * s, wz = -cy * f - sy * s;
         var moving = (f !== 0 || s !== 0);
 
         if (moving) {
-          me.vx += wx * CFG.ACCEL * dt;
-          me.vz += wz * CFG.ACCEL * dt;
+          me.vx += wx * CFG.ACCEL * dt; me.vz += wz * CFG.ACCEL * dt;
         } else {
           var sp = Math.sqrt(me.vx * me.vx + me.vz * me.vz);
           if (sp > 0) {
@@ -489,20 +495,15 @@
         var nz = me.z + me.vz * dt;
         if (!blockedAt(me.x, nz, me.y) || stuck) me.z = nz; else me.vz = 0;
 
-        if ((keys[' '] || actBtn.jump) && me.onGround) {
-          me.vy = CFG.JUMP_V; me.onGround = false;
-        }
+        if ((keys[' '] || actBtn.jump) && me.onGround) { me.vy = CFG.JUMP_V; me.onGround = false; }
         me.vy -= CFG.GRAVITY * dt;
         me.y += me.vy * dt;
 
         var inMap = Math.abs(me.x) <= CFG.HALF && Math.abs(me.z) <= CFG.HALF;
         if (inMap) {
           var groundH = getGroundHeight(me.x, me.z, me.y);
-          if (me.y <= groundH && me.vy <= 0) {
-            me.y = groundH; me.vy = 0; me.onGround = true;
-          } else {
-            me.onGround = false;
-          }
+          if (me.y <= groundH && me.vy <= 0) { me.y = groundH; me.vy = 0; me.onGround = true; }
+          else { me.onGround = false; }
         } else {
           me.onGround = false;
           if (me.y <= CFG.FALL_KILL_Y) dieByFall();
@@ -514,9 +515,7 @@
 
       function updateFoe(dt) {
         var k = Math.min(1, dt * 14);
-        foe.x += (foeNet.x - foe.x) * k;
-        foe.y += (foeNet.y - foe.y) * k;
-        foe.z += (foeNet.z - foe.z) * k;
+        foe.x += (foeNet.x - foe.x) * k; foe.y += (foeNet.y - foe.y) * k; foe.z += (foeNet.z - foe.z) * k;
         foe.yaw = foeNet.yaw;
       }
 
@@ -586,7 +585,6 @@
         var focal = (H * 0.5) / Math.tan(CFG.FOV_DEG * Math.PI / 360);
         var NEAR = CFG.NEAR;
 
-        // 画地面
         var h = CFG.HALF;
         var tris = [
           [[-h, 0, -h], [h, 0, -h], [h, 0, h]],
@@ -603,11 +601,9 @@
             var s = proj(clipped[j], focal, W, H);
             if (j === 0) ctx.moveTo(s[0], s[1]); else ctx.lineTo(s[0], s[1]);
           }
-          ctx.closePath();
-          ctx.fill();
+          ctx.closePath(); ctx.fill();
         }
 
-        // 画边框和网格
         function drawLine3D(p1, p2) {
           var a = camSpace(p1, cam), b = camSpace(p2, cam);
           var s = clipLineNear(a, b, NEAR);
@@ -627,15 +623,12 @@
         var edges = [[[-h, 0.02, -h], [h, 0.02, -h]], [[h, 0.02, -h], [h, 0.02, h]], [[h, 0.02, h], [-h, 0.02, h]], [[-h, 0.02, h], [-h, 0.02, -h]]];
         for (var i = 0; i < edges.length; i++) drawLine3D(edges[i][0], edges[i][1]);
 
-        // 收集所有面
         var faces = [];
         for (var id in buildings) {
           var a = buildings[id].aabb;
           var bf = boxFaces([(a.minx+a.maxx)/2, (a.miny+a.maxy)/2, (a.minz+a.maxz)/2],
             (a.maxx-a.minx)/2, (a.maxy-a.miny)/2, (a.maxz-a.minz)/2, [1,0,0], [0,1,0], [0,0,1]);
-          for (var i = 0; i < bf.length; i++) {
-            bf[i].depth = distSq(bf[i].center, cam.pos); faces.push(bf[i]);
-          }
+          for (var i = 0; i < bf.length; i++) { bf[i].depth = distSq(bf[i].center, cam.pos); faces.push(bf[i]); }
         }
 
         for (var pid in projectiles) {
@@ -649,9 +642,7 @@
               xx/=xl; xy/=xl; xz/=xl;
               var yx = dz[1]*xz-dz[2]*xy, yy = dz[2]*xx-dz[0]*xz, yz = dz[0]*xy-dz[1]*xx;
               var pf = boxFaces([p.x, p.y, p.z], 0.15, 0.15, 0.5, [xx,xy,xz], [yx,yy,yz], dz);
-              for (var i = 0; i < pf.length; i++) {
-                pf[i].depth = distSq(pf[i].center, cam.pos); faces.push(pf[i]);
-              }
+              for (var i = 0; i < pf.length; i++) { pf[i].depth = distSq(pf[i].center, cam.pos); faces.push(pf[i]); }
             }
           }
         }
@@ -671,7 +662,7 @@
           var face = faces[i];
           var vx = cam.pos[0] - face.center[0], vy = cam.pos[1] - face.center[1], vz = cam.pos[2] - face.center[2];
           var d = vx*face.normal[0] + vy*face.normal[1] + vz*face.normal[2];
-          if (d <= 0) continue; // 剔除背面
+          if (d <= 0) continue;
 
           var v0 = face.verts[0], v1 = face.verts[1], v2 = face.verts[2], v3 = face.verts[3];
           var ftris = [[v0, v1, v2], [v0, v2, v3]];
@@ -686,7 +677,7 @@
               if (j === 0) ctx.moveTo(s[0], s[1]); else ctx.lineTo(s[0], s[1]);
             }
             ctx.closePath();
-            ctx.fillStyle = '#33ff55'; // 调试模式绿色
+            ctx.fillStyle = '#33ff55';
             ctx.fill();
             ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 1; ctx.stroke();
           }
@@ -697,6 +688,8 @@
       function tick(now) {
         if (!mounted) return;
         rafId = requestAnimationFrame(tick);
+        if (!gameStarted) return; // 没开始剧情就不要渲染和跑逻辑
+
         if (!lastTime) lastTime = now;
         var dt = Math.min((now - lastTime) / 1000, 0.05);
         lastTime = now;
@@ -710,17 +703,14 @@
         }
 
         if (!gameOver && !introActive) {
-          updateSelf(dt);
-          updateFoe(dt);
-          updateProjectiles(dt);
-          updateNet(dt);
+          updateSelf(dt); updateFoe(dt); updateProjectiles(dt); updateNet(dt);
         }
 
         render();
         updateDebug();
       }
 
-      // ================= 生命周期与事件 =================
+      // ================= 事件绑定 =================
       function onKeyDown(e) {
         var k = (e.key || '').toLowerCase();
         if (k === ' ') { keys[' '] = true; e.preventDefault(); return; }
@@ -812,17 +802,16 @@
         bindBtn(dom.btnFire, 'fire'); bindBtn(dom.btnBuild, 'build'); bindBtn(dom.btnJump, 'jump');
       }
 
-      // ================= 暴露给加载器的接口 =================
+      // ================= 接口暴露 =================
       return {
         mount: function (container) {
           if (mounted) return;
           mounted = true;
           stage = container;
           
-          // 注入样式
           var style = document.createElement('style');
           style.innerHTML = `
-            .fb-hud{position:absolute;inset:0;pointer-events:none;font-family:system-ui,sans-serif;overflow:hidden;color:#dff3e0;}
+            .fb-hud{position:absolute;inset:0;pointer-events:none;font-family:system-ui,sans-serif;overflow:hidden;color:#dff3e0;display:none;}
             .fb-crosshair{position:absolute;left:50%;top:50%;width:22px;height:22px;transform:translate(-50%,-50%);}
             .fb-crosshair::before,.fb-crosshair::after{content:"";position:absolute;background:rgba(180,255,200,.85);box-shadow:0 0 4px rgba(0,0,0,.8);}
             .fb-crosshair::before{left:50%;top:0;width:2px;height:100%;transform:translateX(-50%);}
@@ -858,13 +847,18 @@
             .fb-overlay.fb-win .fb-box{background:rgba(15,40,20,.88);border-color:rgba(120,255,160,.5);}
             .fb-overlay.fb-win h2{color:#8affb0;} .fb-overlay.fb-win p{color:#8fbf9a;}
             .fb-overlay.fb-win button{border-color:rgba(150,255,180,.6);background:rgba(30,80,45,.9);color:#cfffd8;}
+
+            /* 剧情样式 */
+            .fb-story{position:absolute;inset:0;z-index:100;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:system-ui,sans-serif;}
+            .fb-story-text{color:#fff;font-size:24px;max-width:80%;text-align:center;line-height:1.6;opacity:1;transition:opacity 0.3s ease;white-space:pre-wrap;}
+            .fb-story-hint{position:absolute;bottom:40px;color:#666;font-size:14px;animation:fb-blink 2s infinite;}
+            @keyframes fb-blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
           `;
           document.head.appendChild(style);
 
-          // 注入 DOM
           container.innerHTML = `
             <canvas id="fbCanvas" style="display:block;width:100%;height:100%;outline:none;touch-action:none;background:#0a1410;"></canvas>
-            <div class="fb-hud">
+            <div class="fb-hud" id="fbHud">
               <div class="fb-status" id="fbStatus">准备</div>
               <div class="fb-hpbox left"><div class="fb-hpbar"><i id="fbHpSelfBar"></i></div><b id="fbHpSelfVal">100</b></div>
               <div class="fb-hpbox right"><div class="fb-hpbar foe"><i id="fbHpFoeBar"></i></div><b id="fbHpFoeVal">100</b></div>
@@ -888,12 +882,18 @@
                 <button id="fbBtnRestart">重新对局</button>
               </div>
             </div>
+            
+            <div class="fb-story" id="fbStory">
+              <div class="fb-story-text" id="fbStoryText"></div>
+              <div class="fb-story-hint" id="fbStoryHint">点击屏幕继续</div>
+            </div>
           `;
 
           canvas = document.getElementById('fbCanvas');
           ctx = canvas.getContext('2d', { alpha: false });
           
           dom = {
+            hud: document.getElementById('fbHud'),
             status: document.getElementById('fbStatus'),
             hpSelfBar: document.getElementById('fbHpSelfBar'),
             hpFoeBar: document.getElementById('fbHpFoeBar'),
@@ -910,8 +910,17 @@
             overlay: document.getElementById('fbOverlay'),
             overTitle: document.getElementById('fbOverTitle'),
             overDesc: document.getElementById('fbOverDesc'),
-            btnRestart: document.getElementById('fbBtnRestart')
+            btnRestart: document.getElementById('fbBtnRestart'),
+            story: document.getElementById('fbStory'),
+            storyText: document.getElementById('fbStoryText'),
+            storyHint: document.getElementById('fbStoryHint')
           };
+
+          // 初始化剧情文本
+          if (dom.storyText) {
+            dom.storyText.innerHTML = storyLines[0];
+            dom.story.addEventListener('pointerdown', onStoryClick);
+          }
 
           dom.btnRestart.addEventListener('click', function () {
             resetState();
@@ -932,7 +941,6 @@
           window.addEventListener('blur', onBlur);
           
           bindMobileControls();
-          resetState(); // 初始化状态
           
           lastTime = 0;
           rafId = requestAnimationFrame(tick);
@@ -971,6 +979,11 @@
 
           try {
             switch (t) {
+              case 'fort:storydone':
+                foeStoryDone = true;
+                checkStartGame();
+                break;
+
               case 'fort:state':
                 if (typeof msg.x !== 'number' || typeof msg.z !== 'number') return;
                 if (!isFinite(msg.x) || !isFinite(msg.z)) return;
