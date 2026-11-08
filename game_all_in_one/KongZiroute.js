@@ -258,13 +258,15 @@
         return faces;
       }
 
+      // ★ 修复贴图矩阵：先将 0~1 的 UV 乘上图片真实像素尺寸，再进行映射
       function drawAffineTriangle(ctx, img, src, dst) {
-        var x0 = src[0][0], y0 = src[0][1];
-        var x1 = src[1][0], y1 = src[1][1];
-        var x2 = src[2][0], y2 = src[2][1];
+        var x0 = src[0][0] * img.width, y0 = src[0][1] * img.height;
+        var x1 = src[1][0] * img.width, y1 = src[1][1] * img.height;
+        var x2 = src[2][0] * img.width, y2 = src[2][1] * img.height;
         var u0 = dst[0][0], v0 = dst[0][1];
         var u1 = dst[1][0], v1 = dst[1][1];
         var u2 = dst[2][0], v2 = dst[2][1];
+        
         var delta = x0 * (y2 - y1) - x1 * y2 + x2 * y1 + (x1 - x2) * y0;
         if (delta === 0) return;
         var a = -(y0 * (u2 - u1) - y1 * u2 + y2 * u1 + (y1 - y2) * u0) / delta;
@@ -291,7 +293,6 @@
         var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
         var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 2000);
 
-        // 先去 GitHub API 拿最新 SHA
         fetch('https://api.github.com/repos/' + REPO + '/branches/' + BRANCH, {
           cache: 'no-store',
           headers: { Accept: 'application/vnd.github+json' },
@@ -312,7 +313,6 @@
           console.warn('获取最新 SHA 失败，使用 fallback SHA:', err);
         })
         .finally(function () {
-          // 无论成败，都去加载图片
           doLoadImages();
         });
       }
@@ -327,7 +327,6 @@
             images[name] = img;
           };
           img.onerror = function () {
-            // 如果最新 SHA 加载失败（可能是 jsdmirror 还没同步），回退到 fallback SHA
             if (currentSha !== FALLBACK_SHA) {
               console.warn('最新 SHA 图片加载失败，尝试 Fallback SHA: ' + file);
               img.src = CDN_BASE + FALLBACK_SHA + GAME_PATH + file;
@@ -785,7 +784,8 @@
         }
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-        ctx.fillStyle = '#0a1410';
+        // 纯色天空背景
+        ctx.fillStyle = '#87CEEB';
         ctx.fillRect(0, 0, W, H);
 
         var cam = makeCamera([me.x, me.y + CFG.EYE, me.z], me.yaw, me.pitch);
@@ -801,21 +801,37 @@
               var p3 = [gx + step, 0, gz + step], p4 = [gx, 0, gz + step];
               var c1 = camSpace(p1, cam), c2 = camSpace(p2, cam), c3 = camSpace(p3, cam), c4 = camSpace(p4, cam);
 
-              if (c1[2] < NEAR || c2[2] < NEAR || c3[2] < NEAR || c4[2] < NEAR) continue;
+              if (c1[2] < NEAR && c2[2] < NEAR && c3[2] < NEAR && c4[2] < NEAR) continue;
 
-              var s1 = proj(c1, focal, W, H), s2 = proj(c2, focal, W, H);
-              var s3 = proj(c3, focal, W, H), s4 = proj(c4, focal, W, H);
+              var poly = [c1, c2, c3, c4];
+              var clipped = clipPolyNear(poly, NEAR);
+              if (clipped.length < 3) continue;
 
-              if (Math.max(s1[0], s2[0], s3[0], s4[0]) < 0 || Math.min(s1[0], s2[0], s3[0], s4[0]) > W) continue;
-              if (Math.max(s1[1], s2[1], s3[1], s4[1]) < 0 || Math.min(s1[1], s2[1], s3[1], s4[1]) > H) continue;
+              // ★ 修复近处地块变黑：如果有任何顶点被裁剪掉，就用纯色兜底填充
+              if (c1[2] < NEAR || c2[2] < NEAR || c3[2] < NEAR || c4[2] < NEAR) {
+                ctx.beginPath();
+                for (var j = 0; j < clipped.length; j++) {
+                  var s = proj(clipped[j], focal, W, H);
+                  if (j === 0) ctx.moveTo(s[0], s[1]); else ctx.lineTo(s[0], s[1]);
+                }
+                ctx.closePath();
+                ctx.fillStyle = '#8B7355'; // 取地板图的近似主色，防止突兀
+                ctx.fill();
+              } else {
+                var s1 = proj(c1, focal, W, H), s2 = proj(c2, focal, W, H);
+                var s3 = proj(c3, focal, W, H), s4 = proj(c4, focal, W, H);
 
-              var u1 = (gx + h) / (h * 2), v1 = (gz + h) / (h * 2);
-              var u2 = (gx + step + h) / (h * 2), v2 = v1;
-              var u3 = u2, v3 = (gz + step + h) / (h * 2);
-              var u4 = u1, v4 = v3;
+                if (Math.max(s1[0], s2[0], s3[0], s4[0]) < 0 || Math.min(s1[0], s2[0], s3[0], s4[0]) > W) continue;
+                if (Math.max(s1[1], s2[1], s3[1], s4[1]) < 0 || Math.min(s1[1], s2[1], s3[1], s4[1]) > H) continue;
 
-              drawAffineTriangle(ctx, images.map, [[u1,v1],[u2,v2],[u3,v3]], [s1,s2,s3]);
-              drawAffineTriangle(ctx, images.map, [[u1,v1],[u3,v3],[u4,v4]], [s1,s3,s4]);
+                var u1 = (gx + h) / (h * 2), v1 = (gz + h) / (h * 2);
+                var u2 = (gx + step + h) / (h * 2), v2 = v1;
+                var u3 = u2, v3 = (gz + step + h) / (h * 2);
+                var u4 = u1, v4 = v3;
+
+                drawAffineTriangle(ctx, images.map, [[u1,v1],[u2,v2],[u3,v3]], [s1,s2,s3]);
+                drawAffineTriangle(ctx, images.map, [[u1,v1],[u3,v3],[u4,v4]], [s1,s3,s4]);
+              }
             }
           }
         } else {
@@ -1119,14 +1135,13 @@
           mounted = true;
           stage = container;
 
-          // 在这里调用异步加载资源
           loadResources();
 
           var style = document.createElement('style');
           style.innerHTML = `
             .fb-hud{position:absolute;inset:0;pointer-events:none;font-family:system-ui,sans-serif;overflow:hidden;color:#dff3e0;display:none;}
             .fb-crosshair{position:absolute;left:50%;top:50%;width:22px;height:22px;transform:translate(-50%,-50%);}
-            .fb-crosshair::before,.fb-crosshair::after{content:"";position:absolute;background:rgba(180,255,200,.85);box-shadow:0 0 4px rgba(0,0,0,.8);}
+            .fb-crosshair::before,.fb-crosshair::after{content:"";position:absolute;background:rgba(0,0,0,.6);box-shadow:0 0 4px rgba(255,255,255,.8);}
             .fb-crosshair::before{left:50%;top:0;width:2px;height:100%;transform:translateX(-50%);}
             .fb-crosshair::after{top:50%;left:0;height:2px;width:100%;transform:translateY(-50%);}
             .fb-status{position:absolute;left:50%;top:14px;transform:translateX(-50%);padding:6px 16px;border-radius:999px;background:rgba(20,40,25,.82);border:1px solid rgba(120,220,150,.35);font-size:13px;}
@@ -1169,7 +1184,7 @@
           document.head.appendChild(style);
 
           container.innerHTML = `
-            <canvas id="fbCanvas" style="display:block;width:100%;height:100%;outline:none;touch-action:none;background:#0a1410;"></canvas>
+            <canvas id="fbCanvas" style="display:block;width:100%;height:100%;outline:none;touch-action:none;"></canvas>
             
             <div class="fb-story-overlay" id="fbStoryOverlay">
               <div class="fb-story-text" id="fbStoryText"></div>
