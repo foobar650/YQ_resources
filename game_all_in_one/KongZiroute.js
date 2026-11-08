@@ -1,7 +1,6 @@
 (function () {
   'use strict';
 
-  // 防止多次注册
   if (!window.GameRegistry) return;
 
   window.GameRegistry.register('踏入孔府', {
@@ -38,23 +37,22 @@
       var localId = api.isHost ? 0 : 1;
       var remoteId = 1 - localId;
 
-      var buildings = {}; // id -> {id,x,y,z,axis,type,aabb,hp}
-      var projectiles = {}; // id -> {id,owner,x,y,z,vx,vy,vz,life,text}
+      var buildings = {};
+      var projectiles = {}; 
       var seq = 0, fireCd = 0, buildCd = 0, netAcc = 0;
       var gameOver = false;
       var introActive = false;
       var introTimer = 0;
 
-      // 语录库
-      var sayTexts = ["腊肉", "礼乐", "朽木不可雕也", "Just Do IT!"];
-      var sayLoaded = false;
+      // 语录库（默认空）
+      var sayTexts = [];
 
       // 尝试拉取 says.txt
       function loadSays() {
         if (api.buildResourceUrl) {
           var url = api.buildResourceUrl('says.txt');
           var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-          var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 1000); // 1秒超时防卡死
+          var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 1000);
           
           fetch(url, { signal: controller ? controller.signal : undefined })
             .then(function (res) {
@@ -63,21 +61,25 @@
             })
             .then(function (text) {
               clearTimeout(timeoutId);
-              var lines = text.split('\n');
+              // 全局匹配所有被双引号包围的文本
+              var regex = /"([^"]+)"/g;
+              var match;
               var parsed = [];
-              for (var i = 0; i < lines.length; i++) {
-                var match = lines[i].match(/"([^"]+)"/);
-                if (match) parsed.push(match[1]);
+              while ((match = regex.exec(text)) !== null) {
+                if (match[1] && match[1].trim()) {
+                  parsed.push(match[1].trim());
+                }
               }
-              if (parsed.length > 0) {
-                sayTexts = parsed;
-                sayLoaded = true;
-                api.log('成功加载 ' + parsed.length + ' 条语录', 'sys');
+              
+              sayTexts = parsed;
+              api.log('成功加载 ' + parsed.length + ' 条语录', 'sys');
+              if (dom.storyHint && !gameStarted) {
+                // 如果还在等待界面，可以提醒一下加载完毕
               }
             })
             .catch(function (err) {
               clearTimeout(timeoutId);
-              api.log('says.txt 加载失败，使用默认语录: ' + err.message, 'err');
+              api.log('says.txt 加载失败: ' + err.message, 'err');
             });
         }
       }
@@ -101,7 +103,7 @@
       var storyTimeoutId = 0;
       var storyAnimating = false;
 
-      // 隐藏调试功能状态
+      // 隐藏调试功能
       var spacePressCount = 0;
       var spaceTimer = 0;
 
@@ -110,7 +112,6 @@
       var actBtn = { fire: false, build: false, jump: false };
       var lookPointer = { id: -1, x: 0, y: 0 };
       
-      // 玩家状态
       var me = { id: localId, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, yaw: 0, pitch: 0, hp: CFG.MAX_HP, onGround: true };
       var foe = { id: remoteId, x: 0, y: 0, z: 0, yaw: 0, hp: CFG.MAX_HP };
       var foeNet = { x: 0, y: 0, z: 0, yaw: 0 };
@@ -440,7 +441,7 @@
         var id = localId + '_' + (++seq);
         
         var text = "";
-        if (localId === 0) {
+        if (localId === 0 && sayTexts.length > 0) {
           text = sayTexts[Math.floor(Math.random() * sayTexts.length)];
         }
 
@@ -745,7 +746,7 @@
         var edges = [[[-h, 0.02, -h], [h, 0.02, -h]], [[h, 0.02, -h], [h, 0.02, h]], [[h, 0.02, h], [-h, 0.02, h]], [[-h, 0.02, h], [-h, 0.02, -h]]];
         for (var i = 0; i < edges.length; i++) drawLine3D(edges[i][0], edges[i][1]);
 
-        // 收集 3D 面（主机子弹不参与，由 2D 层渲染）
+        // 收集 3D 面
         var faces = [];
         for (var id in buildings) {
           var a = buildings[id].aabb;
@@ -758,7 +759,7 @@
 
         for (var pid in projectiles) {
           var p = projectiles[pid];
-          if (p.owner === 0) continue; // 主机子弹用 Billboard 文字渲染，跳过 3D 几何
+          if (p.owner === 0) continue; // 主机子弹用 2D 文字
 
           var dl = Math.sqrt(p.vx*p.vx + p.vy*p.vy + p.vz*p.vz);
           if (dl > 1e-6) {
@@ -821,12 +822,11 @@
           if (cs[2] < NEAR) continue;
           
           var screenP = proj(cs, focal, W, H);
-          // 透视缩放
           var scale = focal / cs[2];
-          var baseFontSize = 14; 
-          var fontSize = baseFontSize * scale * 0.15; 
           
-          if (fontSize < 6) continue; // 太远不渲染
+          // 调小字号，并相应微调距离系数
+          var fontSize = 10 * scale * 0.15;
+          if (fontSize < 5) continue;
           
           ctx.save();
           ctx.font = 'bold ' + fontSize.toFixed(1) + 'px sans-serif';
@@ -986,7 +986,7 @@
           mounted = true;
           stage = container;
           
-          loadSays(); // 尝试拉取文本资源
+          loadSays();
 
           var style = document.createElement('style');
           style.innerHTML = `
@@ -1038,7 +1038,6 @@
           container.innerHTML = `
             <canvas id="fbCanvas" style="display:block;width:100%;height:100%;outline:none;touch-action:none;background:#0a1410;"></canvas>
             
-            <!-- 剧情层 -->
             <div class="fb-story-overlay" id="fbStoryOverlay">
               <div class="fb-story-text" id="fbStoryText"></div>
               <div class="fb-story-hint" id="fbStoryHint">点击屏幕继续</div>
@@ -1191,7 +1190,7 @@
                 projectiles[msg.id] = { 
                   id: msg.id, owner: remoteId, x: msg.x, y: msg.y, z: msg.z, 
                   vx: msg.vx, vy: msg.vy, vz: msg.vz, life: CFG.PROJ_LIFE,
-                  text: msg.text || "" // 接收对方的文本
+                  text: msg.text || ""
                 };
                 break;
 
