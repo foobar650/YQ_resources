@@ -446,31 +446,47 @@
    *   2. 否则请求 GitHub API
    *   3. API 也失败 → 显示手动输入面板
    * ============================================================ */
-  async function bootstrap() {
-    // 第 1 步：尝试本地保存的 SHA
-    var saved = getSavedSha();
-    if (saved) {
-      log('使用本地保存的 SHA：' + saved.slice(0, 7) + '…', 'sys');
-      var okLocal = await loadAllScripts(saved);
-      if (okLocal) return;
-      log('本地 SHA 加载失败（可能是 CDN 未同步或 SHA 已失效），尝试自动获取最新 SHA…', 'err');
-    }
+async function bootstrap() {
+  var saved = getSavedSha();
+  var apiSha = null;
 
-    // 第 2 步：尝试 GitHub API
-    try {
-      var apiSha = await getLatestCommitSha();
-      log('获取最新 commit SHA：' + apiSha.slice(0, 7) + '…', 'sys');
-      var okApi = await loadAllScripts(apiSha);
-      if (okApi) return;
-      log('API 返回的 SHA 加载失败（CDN 可能未同步），请手动输入 SHA', 'err');
-    } catch (e) {
-      log('获取 commit SHA 失败：' + e.message, 'err');
-    }
-
-    // 第 3 步：显示手动输入面板
-    log('请手动输入 commit SHA 后继续。', 'sys');
-    showShaPanel();
+  // 第 1 步：请求 GitHub API 获取最新 commit SHA
+  try {
+    apiSha = await getLatestCommitSha();
+    log('获取最新 commit SHA：' + apiSha.slice(0, 7) + '…', 'sys');
+  } catch (e) {
+    log('获取 commit SHA 失败：' + e.message + '（可能是网络或环境限制）', 'err');
   }
+
+  // 第 2 步：如果有最新 SHA，优先用它
+  if (apiSha) {
+    if (saved && saved !== apiSha) {
+      log('本地保存的 SHA (' + saved.slice(0, 7) + '…) 不是最新版本，改用最新 SHA', 'sys');
+    }
+    var okApi = await loadAllScripts(apiSha);
+    if (okApi) {
+      // 加载成功，把最新 SHA 写入 localStorage，下次 API 失败时仍可用
+      if (saved !== apiSha) {
+        saveSha(apiSha);
+        log('已将最新 SHA 同步到本地存储', 'sys');
+      }
+      return;
+    }
+    log('最新 SHA 加载失败（CDN 可能未同步），尝试回退到本地保存的 SHA…', 'err');
+  }
+
+  // 第 3 步：回退到 localStorage 中保存的 SHA
+  if (saved) {
+    log('使用本地保存的 SHA：' + saved.slice(0, 7) + '…', 'sys');
+    var okLocal = await loadAllScripts(saved);
+    if (okLocal) return;
+    log('本地 SHA 加载失败（可能是 CDN 未同步或 SHA 已失效）', 'err');
+  }
+
+  // 第 4 步：显示手动输入面板
+  log('请手动输入 commit SHA 后继续。', 'sys');
+  showShaPanel();
+}
 
   /* ============================================================
    * SHA 面板按钮事件

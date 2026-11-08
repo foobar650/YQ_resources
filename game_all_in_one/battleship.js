@@ -19,7 +19,7 @@
 
   var BS_N = 10;
   var CELL = 28;
-  var GRID = BS_N * CELL;          // 280
+  var GRID = BS_N * CELL;
   var CANVAS_W = 800;
   var CANVAS_H = 820;
   var MY_X = 260, MY_Y = 70;
@@ -33,23 +33,23 @@
     create: function (api) {
       /* ---------- 状态 ---------- */
       var state = {
-        phase: 'idle',          // idle | config | waitConfig | deploy | waitPeer | battle | over
+        phase: 'idle',
         isHost: !!api.isHost,
         config: [],
-        myBoard: null,          // 10x10 { shipId, shot }
-        myShots: null,          // 10x10 null|'hit'|'miss'|'pending'
-        myShips: [],            // [{id, len, cells, hits}]
-        pendingShips: [],       // 部署阶段待放置的舰船长度队列（从大到小）
-        currentDir: 'h',        // 'h' 横向 | 'v' 纵向
+        myBoard: null,
+        myShots: null,
+        myShips: [],
+        pendingShips: [],
+        currentDir: 'h',
         myTurn: false,
         deployed: false,
         peerReady: false,
         waitingResult: false,
         gameOver: false,
         iWon: false,
-        hoverCell: null,        // 鼠标所在敌方格子
-        hoverMy: null,          // 鼠标所在我方格子（部署预览用）
-        preview: null           // {cells, valid}
+        hoverCell: null,
+        hoverMy: null,
+        preview: null
       };
 
       /* ---------- DOM / 画布 ---------- */
@@ -477,41 +477,35 @@
       /* ============================================================
        * 攻击 / 判定
        * ============================================================ */
-      function onCanvasClick(e) {
-        if (!canvas) return;
-
-        if (state.phase === 'deploy') {
-          var my = hitTest(e, 'my');
-          if (!my) return;
-          var res = tryPlaceShip(my.x, my.y);
+      function executeAction() {
+        if (state.phase === 'deploy' && state.hoverMy) {
+          var res = tryPlaceShip(state.hoverMy.x, state.hoverMy.y);
           if (!res.ok) {
             api.log('放置失败：' + res.msg, 'err');
             deployHintEl.textContent = '放置失败：' + res.msg;
           } else {
             updateDeployUI();
+            updateDeployPreview();
           }
-          updateDeployPreview();
           draw();
           return;
         }
 
-        if (state.phase !== 'battle' || state.gameOver) return;
-        if (!state.myTurn || state.waitingResult) return;
-
-        var cell = hitTest(e, 'enemy');
-        if (!cell) return;
-        if (state.myShots[cell.y][cell.x] !== null) {
-          resultInfoEl.textContent = '这个格子已经打过了，换一个。';
-          return;
+        if (state.phase === 'battle' && state.hoverCell
+            && state.myTurn && !state.waitingResult && !state.gameOver) {
+          var cell = state.hoverCell;
+          if (state.myShots[cell.y][cell.x] !== null) {
+            resultInfoEl.textContent = '这个格子已经打过了，换一个。';
+            return;
+          }
+          state.waitingResult = true;
+          state.myShots[cell.y][cell.x] = 'pending';
+          api.send({ t: 'bs:attack', x: cell.x, y: cell.y });
+          api.log('发起炮击：' + cellName(cell.x, cell.y), 'send');
+          resultInfoEl.textContent = '';
+          updateBattleStatus();
+          draw();
         }
-
-        state.waitingResult = true;
-        state.myShots[cell.y][cell.x] = 'pending';
-        api.send({ t: 'bs:attack', x: cell.x, y: cell.y });
-        api.log('发起炮击：' + cellName(cell.x, cell.y), 'send');
-        resultInfoEl.textContent = '';
-        updateBattleStatus();
-        draw();
       }
 
       function onReceiveAttack(msg) {
@@ -613,35 +607,79 @@
         return { x: cx, y: cy };
       }
 
-      function onCanvasMove(e) {
+      /* ============================================================
+       * 触屏 / 鼠标统一指针处理
+       *   pointerdown  阻止默认行为（触屏防滚动）+ 更新悬停
+       *   pointermove  更新悬停与预览（桌面鼠标可看到预览）
+       *   pointerup    执行放置 / 攻击（触屏按住拖动 → 松手落在哪个格子就执行到哪个）
+       *   pointerleave / pointercancel  清空悬停与预览
+       * ============================================================ */
+      function updateHover(e) {
         if (!canvas) return;
 
         if (state.phase === 'deploy') {
           var my = hitTest(e, 'my');
-          var changed = (my && !state.hoverMy) ||
-                        (!my && state.hoverMy) ||
-                        (my && state.hoverMy && (my.x !== state.hoverMy.x || my.y !== state.hoverMy.y));
+          var changed = (my && !state.hoverMy)
+            || (!my && state.hoverMy)
+            || (my && state.hoverMy && (my.x !== state.hoverMy.x || my.y !== state.hoverMy.y));
           state.hoverMy = my;
+          state.hoverCell = null;
           updateDeployPreview();
           if (changed || state.preview) draw();
           return;
         }
 
-        if (state.phase !== 'battle') return;
-        var cell = hitTest(e, 'enemy');
-        var changed2 = (cell && !state.hoverCell) ||
-                       (!cell && state.hoverCell) ||
-                       (cell && state.hoverCell && (cell.x !== state.hoverCell.x || cell.y !== state.hoverCell.y));
-        state.hoverCell = cell;
-        if (changed2) draw();
-      }
+        if (state.phase === 'battle') {
+          var cell = hitTest(e, 'enemy');
+          var changed2 = (cell && !state.hoverCell)
+            || (!cell && state.hoverCell)
+            || (cell && state.hoverCell && (cell.x !== state.hoverCell.x || cell.y !== state.hoverCell.y));
+          state.hoverCell = cell;
+          state.hoverMy = null;
+          if (changed2) draw();
+          return;
+        }
 
-      function onCanvasLeave() {
         if (state.hoverCell || state.hoverMy) {
           state.hoverCell = null;
           state.hoverMy = null;
           state.preview = null;
           draw();
+        }
+      }
+
+      function onPointerDown(e) {
+        if (!canvas) return;
+        e.preventDefault();
+        updateHover(e);
+      }
+
+      function onPointerMove(e) {
+        if (!canvas) return;
+        updateHover(e);
+      }
+
+      function onPointerUp(e) {
+        if (!canvas) return;
+        e.preventDefault();
+        updateHover(e);
+        executeAction();
+      }
+
+      function onPointerLeave(e) {
+        if (state.hoverCell || state.hoverMy) {
+          state.hoverCell = null;
+          state.hoverMy = null;
+          state.preview = null;
+          draw();
+        }
+      }
+
+      function onKeyDown(e) {
+        if (state.phase !== 'deploy') return;
+        if (e.key === 'r' || e.key === 'R') {
+          e.preventDefault();
+          toggleDirection();
         }
       }
 
@@ -660,7 +698,6 @@
         drawGridBase(MY_X, MY_Y);
         drawGridBase(EN_X, EN_Y);
 
-        // 我的海域
         if (state.myBoard) {
           for (var y = 0; y < BS_N; y++) {
             for (var x = 0; x < BS_N; x++) {
@@ -689,7 +726,6 @@
           }
         }
 
-        // 部署预览
         if (state.phase === 'deploy' && state.preview) {
           var pv = state.preview;
           for (var i = 0; i < pv.cells.length; i++) {
@@ -710,7 +746,6 @@
           }
         }
 
-        // 敌方海域
         if (state.myShots) {
           for (var yy = 0; yy < BS_N; yy++) {
             for (var xx = 0; xx < BS_N; xx++) {
@@ -740,7 +775,6 @@
           }
         }
 
-        // 对战悬停高亮
         if (state.hoverCell && state.phase === 'battle' && state.myTurn && !state.waitingResult && !state.gameOver) {
           var h = state.hoverCell;
           if (state.myShots[h.y][h.x] === null) {
@@ -791,17 +825,6 @@
         for (var j = 0; j < BS_N; j++) {
           ctx.fillText(String.fromCharCode(65 + j), ox + j * CELL + CELL / 2, oy - 12);
           ctx.fillText(String(j + 1), ox - 14, oy + j * CELL + CELL / 2);
-        }
-      }
-
-      /* ============================================================
-       * 键盘：R 键切换方向
-       * ============================================================ */
-      function onKeyDown(e) {
-        if (state.phase !== 'deploy') return;
-        if (e.key === 'r' || e.key === 'R') {
-          e.preventDefault();
-          toggleDirection();
         }
       }
 
@@ -879,9 +902,11 @@
         panelHost.appendChild(deployPanel);
         panelHost.appendChild(battlePanel);
 
-        canvas.addEventListener('click', onCanvasClick);
-        canvas.addEventListener('mousemove', onCanvasMove);
-        canvas.addEventListener('mouseleave', onCanvasLeave);
+        canvas.addEventListener('pointerdown', onPointerDown);
+        canvas.addEventListener('pointermove', onPointerMove);
+        canvas.addEventListener('pointerup', onPointerUp);
+        canvas.addEventListener('pointerleave', onPointerLeave);
+        canvas.addEventListener('pointercancel', onPointerLeave);
         window.addEventListener('keydown', onKeyDown);
 
         state.myBoard = createEmptyBoard();
@@ -907,9 +932,11 @@
 
       function unmount() {
         if (canvas) {
-          canvas.removeEventListener('click', onCanvasClick);
-          canvas.removeEventListener('mousemove', onCanvasMove);
-          canvas.removeEventListener('mouseleave', onCanvasLeave);
+          canvas.removeEventListener('pointerdown', onPointerDown);
+          canvas.removeEventListener('pointermove', onPointerMove);
+          canvas.removeEventListener('pointerup', onPointerUp);
+          canvas.removeEventListener('pointerleave', onPointerLeave);
+          canvas.removeEventListener('pointercancel', onPointerLeave);
         }
         window.removeEventListener('keydown', onKeyDown);
         canvas = null;
