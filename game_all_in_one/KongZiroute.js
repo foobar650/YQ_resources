@@ -44,57 +44,24 @@
       var introActive = false;
       var introTimer = 0;
 
-      // 语录库（如果文件读取失败，会使用这个兜底）
-      var sayTexts = ["礼乐", "腊肉"];
+      // 内联的经典语录（当副机子弹击中时作为主机子弹的文字展示）
+      var sayTexts = [
+        "朽木不可雕也，粪土之墙不可污也，于予与何诛？",
+        "非吾徒也。小子鸣鼓而攻之，可也。",
+        "过我门而不入我室，我不憾焉者，其惟乡愿乎！乡愿，德之贼也。",
+        "幼而不孙弟，长而无述焉，老而不死，是为贼。",
+        "由之瑟，奚为于丘之门？",
+        "小人哉，樊须也！",
+        "予之不仁也！",
+        "赐也，非尔所能也。",
+        "赐也贤乎哉？夫我则不暇。",
+        "枨也欲，焉得刚？",
+        "八佾舞于庭，是可忍也，孰不可忍也？",
+        "乡愿，德之贼也。"
+      ];
 
-      // 尝试拉取 says.txt
-      function loadSays() {
-        var url = 'says.txt';
-        
-        // 优先使用加载器提供的方法
-        if (api.buildResourceUrl) {
-          url = api.buildResourceUrl('says.txt');
-        } else if (document.currentScript && document.currentScript.src) {
-          // 兜底：基于当前 JS 文件的 URL 推导相对路径
-          var scriptUrl = document.currentScript.src;
-          var baseDir = scriptUrl.substring(0, scriptUrl.lastIndexOf('/') + 1);
-          url = baseDir + 'says.txt';
-        }
-
-        api.log('正在加载语录: ' + url, 'info');
-
-        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 2000);
-        
-        fetch(url, { signal: controller ? controller.signal : undefined })
-          .then(function (res) {
-            if (!res.ok) throw new Error('HTTP ' + res.status);
-            return res.text();
-          })
-          .then(function (text) {
-            clearTimeout(timeoutId);
-            // 全局匹配所有被双引号包围的文本
-            var regex = /"([^"]+)"/g;
-            var match;
-            var parsed = [];
-            while ((match = regex.exec(text)) !== null) {
-              if (match[1] && match[1].trim()) {
-                parsed.push(match[1].trim());
-              }
-            }
-            
-            if (parsed.length > 0) {
-              sayTexts = parsed;
-              api.log('成功读取 ' + parsed.length + ' 条语录', 'sys');
-            } else {
-              api.log('says.txt 格式不正确或为空，使用默认语录', 'err');
-            }
-          })
-          .catch(function (err) {
-            clearTimeout(timeoutId);
-            api.log('says.txt 加载失败: ' + err.message + ' (将使用默认语录)', 'err');
-          });
-      }
+      // 资源字典
+      var images = {};
 
       // 剧情状态
       var storyTexts = api.isHost ? [
@@ -114,6 +81,7 @@
       var gameStarted = false;
       var storyTimeoutId = 0;
       var storyAnimating = false;
+      var storyFinished = false;
 
       // 隐藏调试功能
       var spacePressCount = 0;
@@ -278,14 +246,43 @@
           var cx = (v[0][0] + v[1][0] + v[2][0] + v[3][0]) * 0.25;
           var cy = (v[0][1] + v[1][1] + v[2][1] + v[3][1]) * 0.25;
           var cz = (v[0][2] + v[1][2] + v[2][2] + v[3][2]) * 0.25;
-          faces.push({ verts: v, normal: n, center: [cx, cy, cz] });
+          faces.push({ verts: v, normal: n, center: [cx, cy, cz], uvs: [[0,1],[1,1],[1,0],[0,0]] });
         }
         return faces;
       }
 
+      // 通用仿射纹理映射
+      function drawAffineTriangle(ctx, img, src, dst) {
+        var x0 = src[0][0], y0 = src[0][1];
+        var x1 = src[1][0], y1 = src[1][1];
+        var x2 = src[2][0], y2 = src[2][1];
+        var u0 = dst[0][0], v0 = dst[0][1];
+        var u1 = dst[1][0], v1 = dst[1][1];
+        var u2 = dst[2][0], v2 = dst[2][1];
+        var delta = x0 * (y2 - y1) - x1 * y2 + x2 * y1 + (x1 - x2) * y0;
+        if (delta === 0) return;
+        var a = -(y0 * (u2 - u1) - y1 * u2 + y2 * u1 + (y1 - y2) * u0) / delta;
+        var b = (y1 * v2 + y0 * (v1 - v2) - y2 * v1 + (y2 - y1) * v0) / delta;
+        var c = (x0 * (u2 - u1) - x1 * u2 + x2 * u1 + (x1 - x2) * u0) / delta;
+        var d = -(x1 * v2 + x0 * (v1 - v2) - x2 * v1 + (x2 - x1) * v0) / delta;
+        var e = (x0 * (y2 * u1 - y1 * u2) + y0 * (x1 * u2 - x2 * u1) + (x2 * y1 - x1 * y2) * u0) / delta;
+        var f = (x0 * (y2 * v1 - y1 * v2) + y0 * (x1 * v2 - x2 * v1) + (x2 * y1 - x1 * y2) * v0) / delta;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(u0, v0);
+        ctx.lineTo(u1, v1);
+        ctx.lineTo(u2, v2);
+        ctx.closePath();
+        ctx.clip();
+        ctx.transform(a, b, c, d, e, f);
+        ctx.drawImage(img, 0, 0);
+        ctx.restore();
+      }
+
       // ================= 剧情控制 =================
       function showNextStory() {
-        if (storyAnimating || localStoryReady || gameStarted) return;
+        if (storyFinished || storyAnimating || gameStarted) return;
 
         if (storyIdx < storyTexts.length) {
           storyAnimating = true;
@@ -302,12 +299,15 @@
             storyAnimating = false;
             
             if (storyIdx >= storyTexts.length) {
-              localStoryReady = true;
-              if (dom.storyHint) dom.storyHint.style.display = 'none';
-              checkStorySync();
-              api.send({ t: 'fort:story:ready' });
+              storyFinished = true;
+              if (dom.storyHint) dom.storyHint.textContent = '点击屏幕继续';
             }
           }, 500);
+        } else {
+          localStoryReady = true;
+          if (dom.storyHint) dom.storyHint.style.display = 'none';
+          checkStorySync();
+          api.send({ t: 'fort:story:ready' });
         }
       }
 
@@ -331,7 +331,7 @@
       }
 
       function onStoryClick() {
-        if (!mounted || gameStarted || localStoryReady) return;
+        if (!mounted || gameStarted) return;
         showNextStory();
       }
 
@@ -453,7 +453,6 @@
         var id = localId + '_' + (++seq);
         
         var text = "";
-        // 只有主机（孔子）发射的子弹才携带语录
         if (localId === 0 && sayTexts.length > 0) {
           text = sayTexts[Math.floor(Math.random() * sayTexts.length)];
         }
@@ -717,47 +716,55 @@
         var cam = makeCamera([me.x, me.y + CFG.EYE, me.z], me.yaw, me.pitch);
         var focal = (H * 0.5) / Math.tan(CFG.FOV_DEG * Math.PI / 360);
         var NEAR = CFG.NEAR;
-
-        // 画地面
         var h = CFG.HALF;
-        var tris = [
-          [[-h, 0, -h], [h, 0, -h], [h, 0, h]],
-          [[-h, 0, -h], [h, 0, h], [-h, 0, h]]
-        ];
-        ctx.fillStyle = '#2e6a3a';
-        for (var i = 0; i < 2; i++) {
-          var pts = [];
-          for (var k = 0; k < 3; k++) pts.push(camSpace(tris[i][k], cam));
-          var clipped = clipPolyNear(pts, NEAR);
-          if (clipped.length < 3) continue;
-          ctx.beginPath();
-          for (var j = 0; j < clipped.length; j++) {
-            var s = proj(clipped[j], focal, W, H);
-            if (j === 0) ctx.moveTo(s[0], s[1]); else ctx.lineTo(s[0], s[1]);
+
+        // 画地面：按 10x10 分块贴图，避免严重的透视扭曲
+        if (images.map) {
+          var step = 10;
+          for (var gx = -h; gx < h; gx += step) {
+            for (var gz = -h; gz < h; gz += step) {
+              var p1 = [gx, 0, gz], p2 = [gx + step, 0, gz];
+              var p3 = [gx + step, 0, gz + step], p4 = [gx, 0, gz + step];
+              var c1 = camSpace(p1, cam), c2 = camSpace(p2, cam), c3 = camSpace(p3, cam), c4 = camSpace(p4, cam);
+
+              if (c1[2] < NEAR || c2[2] < NEAR || c3[2] < NEAR || c4[2] < NEAR) continue;
+
+              var s1 = proj(c1, focal, W, H), s2 = proj(c2, focal, W, H);
+              var s3 = proj(c3, focal, W, H), s4 = proj(c4, focal, W, H);
+
+              if (Math.max(s1[0], s2[0], s3[0], s4[0]) < 0 || Math.min(s1[0], s2[0], s3[0], s4[0]) > W) continue;
+              if (Math.max(s1[1], s2[1], s3[1], s4[1]) < 0 || Math.min(s1[1], s2[1], s3[1], s4[1]) > H) continue;
+
+              var u1 = (gx + h) / (h * 2), v1 = (gz + h) / (h * 2);
+              var u2 = (gx + step + h) / (h * 2), v2 = v1;
+              var u3 = u2, v3 = (gz + step + h) / (h * 2);
+              var u4 = u1, v4 = v3;
+
+              drawAffineTriangle(ctx, images.map, [[u1,v1],[u2,v2],[u3,v3]], [s1,s2,s3]);
+              drawAffineTriangle(ctx, images.map, [[u1,v1],[u3,v3],[u4,v4]], [s1,s3,s4]);
+            }
           }
-          ctx.closePath();
-          ctx.fill();
+        } else {
+          // 没图时纯色兜底
+          var tris = [
+            [[-h, 0, -h], [h, 0, -h], [h, 0, h]],
+            [[-h, 0, -h], [h, 0, h], [-h, 0, h]]
+          ];
+          ctx.fillStyle = '#2e6a3a';
+          for (var i = 0; i < 2; i++) {
+            var pts = [];
+            for (var k = 0; k < 3; k++) pts.push(camSpace(tris[i][k], cam));
+            var clipped = clipPolyNear(pts, NEAR);
+            if (clipped.length < 3) continue;
+            ctx.beginPath();
+            for (var j = 0; j < clipped.length; j++) {
+              var s = proj(clipped[j], focal, W, H);
+              if (j === 0) ctx.moveTo(s[0], s[1]); else ctx.lineTo(s[0], s[1]);
+            }
+            ctx.closePath();
+            ctx.fill();
+          }
         }
-
-        // 画网格
-        function drawLine3D(p1, p2) {
-          var a = camSpace(p1, cam), b = camSpace(p2, cam);
-          var s = clipLineNear(a, b, NEAR);
-          if (!s) return;
-          var s1 = proj(s[0], focal, W, H), s2 = proj(s[1], focal, W, H);
-          if ((s1[0] < -10000 && s2[0] < -10000) || (s1[0] > W+10000 && s2[0] > W+10000) ||
-              (s1[1] < -10000 && s2[1] < -10000) || (s1[1] > H+10000 && s2[1] > H+10000)) return;
-          ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
-        }
-
-        ctx.strokeStyle = 'rgba(110,200,130,.3)'; ctx.lineWidth = 1;
-        for (var v = -h; v <= h; v += 2) {
-          drawLine3D([-h, 0.01, v], [h, 0.01, v]);
-          drawLine3D([v, 0.01, -h], [v, 0.01, h]);
-        }
-        ctx.strokeStyle = 'rgba(200, 255, 200, 0.8)'; ctx.lineWidth = 2;
-        var edges = [[[-h, 0.02, -h], [h, 0.02, -h]], [[h, 0.02, -h], [h, 0.02, h]], [[h, 0.02, h], [-h, 0.02, h]], [[-h, 0.02, h], [-h, 0.02, -h]]];
-        for (var i = 0; i < edges.length; i++) drawLine3D(edges[i][0], edges[i][1]);
 
         // 收集 3D 面
         var faces = [];
@@ -784,7 +791,9 @@
               var yx = dz[1]*xz-dz[2]*xy, yy = dz[2]*xx-dz[0]*xz, yz = dz[0]*xy-dz[1]*xx;
               var pf = boxFaces([p.x, p.y, p.z], 0.15, 0.15, 0.5, [xx,xy,xz], [yx,yy,yz], dz);
               for (var i = 0; i < pf.length; i++) {
-                pf[i].depth = distSq(pf[i].center, cam.pos); faces.push(pf[i]);
+                pf[i].depth = distSq(pf[i].center, cam.pos); 
+                pf[i].texture = 'larou'; // 设置副机子弹贴图
+                faces.push(pf[i]);
               }
             }
           }
@@ -793,11 +802,20 @@
         var fx = me.x - foe.x, fz = me.z - foe.z, fl = Math.sqrt(fx*fx + fz*fz);
         if (fl < 1e-3) { fx = 0; fz = -1; } else { fx /= fl; fz /= fl; }
         var facing = [fx, 0, fz], right = [fz, 0, -fx], c = [foe.x, foe.y + 1, foe.z];
+        
         var ff = [{ verts: [
           [c[0]-right[0], c[1]-1, c[2]-right[2]], [c[0]+right[0], c[1]-1, c[2]+right[2]],
           [c[0]+right[0], c[1]+1, c[2]+right[2]], [c[0]-right[0], c[1]+1, c[2]-right[2]]
         ], normal: facing, center: c }];
-        for (var i = 0; i < ff.length; i++) { ff[i].depth = distSq(ff[i].center, cam.pos); faces.push(ff[i]); }
+        
+        // 设置对手贴图：主机看副机(wantong)，副机看主机(kongzi)
+        ff[0].texture = (localId === 0) ? 'wantong' : 'kongzi';
+        ff[0].uvs = [[0,1], [1,1], [1,0], [0,0]]; // 修正人物贴图方向
+        
+        for (var i = 0; i < ff.length; i++) { 
+          ff[i].depth = distSq(ff[i].center, cam.pos); 
+          faces.push(ff[i]); 
+        }
 
         faces.sort(function (a, b) { return b.depth - a.depth; });
 
@@ -808,25 +826,60 @@
           if (d <= 0) continue;
 
           var v0 = face.verts[0], v1 = face.verts[1], v2 = face.verts[2], v3 = face.verts[3];
-          var ftris = [[v0, v1, v2], [v0, v2, v3]];
-          for (var k = 0; k < 2; k++) {
-            var cp = [];
-            for (var j = 0; j < 3; j++) cp.push(camSpace(ftris[k][j], cam));
-            var cl = clipPolyNear(cp, NEAR);
-            if (cl.length < 3) continue;
+          var c0 = camSpace(v0, cam), c1 = camSpace(v1, cam), c2 = camSpace(v2, cam), c3 = camSpace(v3, cam);
+          
+          // 如果贴近相机且被裁剪，降级为纯色
+          if (c0[2] < NEAR || c1[2] < NEAR || c2[2] < NEAR || c3[2] < NEAR) {
+            var clipped = clipPolyNear([c0, c1, c2, c3], NEAR);
+            if (clipped.length < 3) continue;
             ctx.beginPath();
-            for (var j = 0; j < cl.length; j++) {
-              var s = proj(cl[j], focal, W, H);
+            for (var j = 0; j < clipped.length; j++) {
+              var s = proj(clipped[j], focal, W, H);
               if (j === 0) ctx.moveTo(s[0], s[1]); else ctx.lineTo(s[0], s[1]);
             }
             ctx.closePath();
             ctx.fillStyle = '#33ff55';
             ctx.fill();
-            ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 1; ctx.stroke();
+            ctx.strokeStyle = 'rgba(0,0,0,.45)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            continue;
+          }
+
+          var s0 = proj(c0, focal, W, H), s1 = proj(c1, focal, W, H);
+          var s2 = proj(c2, focal, W, H), s3 = proj(c3, focal, W, H);
+
+          var img = face.texture ? images[face.texture] : null;
+          if (img && face.uvs) {
+            var uv = face.uvs;
+            drawAffineTriangle(ctx, img, [uv[0], uv[1], uv[2]], [s0, s1, s2]);
+            drawAffineTriangle(ctx, img, [uv[0], uv[2], uv[3]], [s0, s2, s3]);
+            
+            ctx.beginPath();
+            ctx.moveTo(s0[0], s0[1]);
+            ctx.lineTo(s1[0], s1[1]);
+            ctx.lineTo(s2[0], s2[1]);
+            ctx.lineTo(s3[0], s3[1]);
+            ctx.closePath();
+            ctx.strokeStyle = 'rgba(0,0,0,.45)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          } else {
+            ctx.beginPath();
+            ctx.moveTo(s0[0], s0[1]);
+            ctx.lineTo(s1[0], s1[1]);
+            ctx.lineTo(s2[0], s2[1]);
+            ctx.lineTo(s3[0], s3[1]);
+            ctx.closePath();
+            ctx.fillStyle = '#33ff55';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,.45)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
           }
         }
 
-        // ===== 渲染主机的 Billboard 文字子弹 =====
+        // 渲染主机的 Billboard 文字子弹
         for (var pid in projectiles) {
           var p = projectiles[pid];
           if (p.owner !== 0 || !p.text) continue;
@@ -835,8 +888,6 @@
           if (cs[2] < NEAR) continue;
           
           var screenP = proj(cs, focal, W, H);
-          
-          // 字体大小限制在 8px 到 50px 之间，防止过近或过远导致异常
           var baseFontSize = 14;
           var screenFontSize = (baseFontSize * focal) / (cs[2] * 30);
           screenFontSize = Math.max(8, Math.min(50, screenFontSize));
@@ -998,8 +1049,30 @@
           if (mounted) return;
           mounted = true;
           stage = container;
+
+          // 加载贴图
+          var baseDir = '';
+          if (api.buildResourceUrl) {
+            var testUrl = api.buildResourceUrl('test');
+            baseDir = testUrl.substring(0, testUrl.lastIndexOf('/') + 1);
+          } else if (document.currentScript && document.currentScript.src) {
+            var scriptUrl = document.currentScript.src;
+            baseDir = scriptUrl.substring(0, scriptUrl.lastIndexOf('/') + 1);
+          }
           
-          loadSays();
+          function loadImage(name, url) {
+            if (!url) return;
+            var img = new Image();
+            img.crossOrigin = 'Anonymous';
+            img.onload = function() { images[name] = img; };
+            img.onerror = function() { console.log('Image failed: ' + url); };
+            img.src = url;
+          }
+          
+          loadImage('kongzi', baseDir + 'kongzi.jpg');
+          loadImage('wantong', baseDir + 'wantong.jpg');
+          loadImage('map', baseDir + 'map.webp');
+          loadImage('larou', baseDir + 'larou.jpg');
 
           var style = document.createElement('style');
           style.innerHTML = `
@@ -1040,7 +1113,6 @@
             .fb-overlay.fb-win h2{color:#8affb0;} .fb-overlay.fb-win p{color:#8fbf9a;}
             .fb-overlay.fb-win button{border-color:rgba(150,255,180,.6);background:rgba(30,80,45,.9);color:#cfffd8;}
             
-            /* 剧情遮罩层 */
             .fb-story-overlay{position:absolute;inset:0;z-index:60;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;}
             .fb-story-text{font-size:clamp(18px,4vw,32px);color:#fff;text-align:center;padding:0 40px;max-width:800px;line-height:1.6;opacity:0;transition:opacity 0.5s ease;}
             .fb-story-hint{position:absolute;bottom:40px;font-size:14px;color:rgba(255,255,255,.4);animation:fb-pulse 2s infinite;}
