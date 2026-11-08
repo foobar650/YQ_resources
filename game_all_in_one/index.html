@@ -23,6 +23,10 @@
   .card h2 { font-size: 14px; margin: 0 0 10px; color: #58a6ff; font-weight: 600; }
   .hint { font-size: 12px; color: #8b949e; margin: 8px 0 0; }
   .hint.warn { color: #d29922; }
+  .hint code {
+    background: #21262d; padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: #e6edf3;
+  }
 
   textarea {
     width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
@@ -110,6 +114,17 @@
     padding: 9px 12px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; margin: 8px 0;
   }
   #shaInput:focus { outline: none; border-color: #58a6ff; }
+
+  #shaStatus {
+    font-size: 13px; line-height: 1.65; margin: 0 0 6px; color: #8b949e;
+    padding: 10px 12px; background: #0d1117; border-radius: 6px; border-left: 3px solid #30363d;
+  }
+  #shaStatus.stale { color: #d29922; border-left-color: #d29922; background: #2d2208; }
+  #shaStatus.fail  { color: #f85149; border-left-color: #f85149; background: #2d0f12; }
+  #shaStatus code {
+    background: rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: inherit;
+  }
 </style>
 </head>
 <body>
@@ -120,17 +135,18 @@
     <span id="statusBadge" class="badge off">未连接</span>
   </div>
 
-  <!-- ================= 手动 SHA 面板（自动获取失败时显示） ================= -->
+  <!-- ================= SHA 面板 ================= -->
   <section id="shaPanel" class="card" style="display:none;">
-    <h2>手动输入 Commit SHA</h2>
-    <p class="hint">自动获取 SHA 失败（可能是网络或环境限制）。请输入最新的 40 位 commit SHA，脚本会基于它拼接 CDN 地址。</p>
+    <h2>Commit SHA</h2>
+    <p id="shaStatus">请输入最新的 40 位 commit SHA。</p>
     <input id="shaInput" type="text" placeholder="例如：a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0">
     <div class="row">
       <button id="btnShaSave" type="button">保存并使用</button>
+      <button id="btnShaRetry" class="copy" type="button">重新尝试自动获取</button>
       <button id="btnShaClear" class="danger" type="button">清除已保存的 SHA</button>
     </div>
     <p id="shaError" class="hint warn"></p>
-    <p class="hint">保存后 SHA 会写入浏览器 localStorage，下次打开页面会自动使用，不再请求 GitHub API。</p>
+    <p class="hint">SHA 会写入浏览器 localStorage，下次自动获取失败时会用它兜底。</p>
   </section>
 
   <!-- 信令区 -->
@@ -225,8 +241,10 @@
   var btnGameHangup   = document.getElementById('btnGameHangup');
 
   var shaPanel    = document.getElementById('shaPanel');
+  var shaStatus   = document.getElementById('shaStatus');
   var shaInput    = document.getElementById('shaInput');
   var btnShaSave  = document.getElementById('btnShaSave');
+  var btnShaRetry = document.getElementById('btnShaRetry');
   var btnShaClear = document.getElementById('btnShaClear');
   var shaError    = document.getElementById('shaError');
 
@@ -357,9 +375,28 @@
     try { localStorage.removeItem(LS_SHA_KEY); } catch (e) { /* 忽略 */ }
   }
 
-  function showShaPanel() {
+  /* ============================================================
+   * SHA 面板显示 / 隐藏
+   *   mode: 'manual'        全部失败，需要用户输入
+   *   mode: 'stale-local'   使用本地 SHA 兜底，但可能过时
+   * ============================================================ */
+  function showShaPanel(mode, currentSha, message) {
     shaPanel.style.display = 'block';
     shaError.textContent = '';
+
+    shaStatus.className = '';
+    if (mode === 'stale-local') {
+      shaStatus.classList.add('stale');
+      shaStatus.innerHTML = message || '当前使用本地保存的 SHA（可能不是最新版本）。';
+    } else if (mode === 'manual') {
+      shaStatus.classList.add('fail');
+      shaStatus.innerHTML = message || '无法加载游戏，请手动输入有效的 commit SHA。';
+    } else {
+      shaStatus.textContent = message || '请输入最新的 40 位 commit SHA。';
+    }
+
+    shaInput.value = currentSha || '';
+    if (currentSha) shaInput.select();
     shaInput.focus();
   }
 
@@ -397,7 +434,6 @@
 
   /* ============================================================
    * 按指定 SHA 加载所有脚本
-   * 返回 true = 全部成功；false = 至少一个失败（面板应保持可见）
    * ============================================================ */
   async function loadAllScripts(sha) {
     var CDN_BASE = 'https://cdn.jsdmirror.com/gh/'
@@ -429,7 +465,6 @@
         allOk = false;
         continue;
       }
-      // loadScript 成功只代表文件下载成功；要检查游戏是否真的注册了
       if (!window.GameRegistry || !window.GameRegistry.get(item.id)) {
         log('游戏 ' + item.id + '（' + item.file + '）未能注册，脚本可能语法错误', 'err');
         allOk = false;
@@ -442,54 +477,75 @@
 
   /* ============================================================
    * 启动流程
-   *   1. localStorage 有 SHA → 直接加载
-   *   2. 否则请求 GitHub API
-   *   3. API 也失败 → 显示手动输入面板
+   *   1. 先请求 GitHub API 拿最新 SHA（保证不会静默用旧 SHA）
+   *   2. API 成功 → 用最新 SHA 加载 → 同步 localStorage
+   *   3. API 失败或新 SHA 加载失败 → 回退到本地 SHA，但显示面板警告
+   *   4. 全部失败 → 显示面板等待手动输入
    * ============================================================ */
-async function bootstrap() {
-  var saved = getSavedSha();
-  var apiSha = null;
+  async function bootstrap() {
+    var saved = getSavedSha();
+    var apiSha = null;
+    var apiError = null;
 
-  // 第 1 步：请求 GitHub API 获取最新 commit SHA
-  try {
-    apiSha = await getLatestCommitSha();
-    log('获取最新 commit SHA：' + apiSha.slice(0, 7) + '…', 'sys');
-  } catch (e) {
-    log('获取 commit SHA 失败：' + e.message + '（可能是网络或环境限制）', 'err');
-  }
-
-  // 第 2 步：如果有最新 SHA，优先用它
-  if (apiSha) {
-    if (saved && saved !== apiSha) {
-      log('本地保存的 SHA (' + saved.slice(0, 7) + '…) 不是最新版本，改用最新 SHA', 'sys');
+    // 第 1 步：尝试获取最新 SHA
+    try {
+      apiSha = await getLatestCommitSha();
+      log('获取最新 commit SHA：' + apiSha.slice(0, 7) + '…', 'sys');
+    } catch (e) {
+      apiError = e;
+      log('获取 commit SHA 失败：' + e.message + '（可能是网络或环境限制）', 'err');
     }
-    var okApi = await loadAllScripts(apiSha);
-    if (okApi) {
-      // 加载成功，把最新 SHA 写入 localStorage，下次 API 失败时仍可用
-      if (saved !== apiSha) {
-        saveSha(apiSha);
-        log('已将最新 SHA 同步到本地存储', 'sys');
+
+    // 第 2 步：有最新 SHA 时优先使用
+    if (apiSha) {
+      if (saved && saved !== apiSha) {
+        log('本地保存的 SHA (' + saved.slice(0, 7) + '…) 不是最新版本，改用最新 SHA', 'sys');
       }
-      return;
+      var okApi = await loadAllScripts(apiSha);
+      if (okApi) {
+        if (saved !== apiSha) {
+          saveSha(apiSha);
+          log('已将最新 SHA 同步到本地存储', 'sys');
+        }
+        hideShaPanel();
+        return;
+      }
+      log('最新 SHA 加载失败（CDN 可能未同步），尝试回退到本地保存的 SHA…', 'err');
     }
-    log('最新 SHA 加载失败（CDN 可能未同步），尝试回退到本地保存的 SHA…', 'err');
-  }
 
-  // 第 3 步：回退到 localStorage 中保存的 SHA
-  if (saved) {
-    log('使用本地保存的 SHA：' + saved.slice(0, 7) + '…', 'sys');
-    var okLocal = await loadAllScripts(saved);
-    if (okLocal) return;
-    log('本地 SHA 加载失败（可能是 CDN 未同步或 SHA 已失效）', 'err');
-  }
+    // 第 3 步：回退到本地 SHA
+    if (saved) {
+      log('使用本地保存的 SHA：' + saved.slice(0, 7) + '…（可能已过时）', 'sys');
+      var okLocal = await loadAllScripts(saved);
+      if (okLocal) {
+        // 【关键】即使用本地 SHA 加载成功，也显示面板警告，避免用户不知情用过时版本
+        var msg;
+        if (apiSha) {
+          msg = '⚠️ <b>最新 SHA 加载失败</b>（CDN 可能未同步），<br>'
+              + '当前使用本地保存的 SHA：<code>' + saved.slice(0, 7) + '…</code>。<br>'
+              + '如果游戏代码不是最新版，可点击「重新尝试自动获取」，或手动输入有效 SHA。';
+        } else {
+          msg = '⚠️ <b>无法获取最新 SHA</b>'
+              + (apiError ? '（' + apiError.message + '）' : '')
+              + '<br>当前使用本地保存的 SHA：<code>' + saved.slice(0, 7) + '…</code>。<br>'
+              + '如果这不是最新版本，请手动输入最新 SHA，或点击「重新尝试自动获取」。';
+        }
+        showShaPanel('stale-local', saved, msg);
+        return;
+      }
+      log('本地 SHA 加载失败（可能是 CDN 未同步或 SHA 已失效）', 'err');
+    }
 
-  // 第 4 步：显示手动输入面板
-  log('请手动输入 commit SHA 后继续。', 'sys');
-  showShaPanel();
-}
+    // 第 4 步：全部失败
+    var failMsg = '❌ <b>无法加载游戏</b>。';
+    if (apiError) failMsg += '获取最新 SHA 失败：' + apiError.message + '。';
+    if (saved) failMsg += '本地保存的 SHA 也加载失败。';
+    failMsg += '请手动输入有效的 commit SHA。';
+    showShaPanel('manual', saved || '', failMsg);
+  }
 
   /* ============================================================
-   * SHA 面板按钮事件
+   * SHA 面板按钮
    * ============================================================ */
   btnShaSave.addEventListener('click', async function () {
     var v = shaInput.value.trim().toLowerCase();
@@ -502,13 +558,48 @@ async function bootstrap() {
     saveSha(v);
     log('已保存 SHA：' + v.slice(0, 7) + '…，开始加载脚本…', 'sys');
 
+    var hadGames = window.GameRegistry.list().length > 0;
     var ok = await loadAllScripts(v);
     if (ok) {
       hideShaPanel();
       log('所有游戏加载成功。', 'sys');
+      if (hadGames) {
+        log('提示：已加载过的游戏代码仍为旧版本，如需最新代码请刷新页面。', 'sys');
+      }
     } else {
       shaError.textContent = '加载失败：可能是 CDN 还没同步这个 commit，或 SHA 无效。请稍后重试或换一个 SHA。';
       log('使用手动输入的 SHA 加载失败', 'err');
+    }
+  });
+
+  btnShaRetry.addEventListener('click', async function () {
+    btnShaRetry.disabled = true;
+    btnShaRetry.textContent = '获取中…';
+    shaError.textContent = '';
+    log('重新尝试自动获取最新 SHA…', 'sys');
+
+    try {
+      var apiSha = await getLatestCommitSha();
+      log('获取最新 commit SHA：' + apiSha.slice(0, 7) + '…', 'sys');
+      var hadGames = window.GameRegistry.list().length > 0;
+      var ok = await loadAllScripts(apiSha);
+      if (ok) {
+        saveSha(apiSha);
+        log('已切换到最新 SHA：' + apiSha.slice(0, 7) + '…，并同步到本地', 'sys');
+        hideShaPanel();
+        if (hadGames) {
+          log('提示：已加载过的游戏代码仍为旧版本，如需最新代码请刷新页面。', 'sys');
+        }
+      } else {
+        shaError.textContent = '最新 SHA 加载失败（CDN 可能未同步），请稍后重试或手动输入其他 SHA。';
+        log('最新 SHA 加载失败', 'err');
+      }
+    } catch (e) {
+      shaError.textContent = '获取失败：' + e.message + '。当前使用的 SHA 保持不变。';
+      log('获取 commit SHA 失败：' + e.message, 'err');
+    } finally {
+      btnShaRetry.disabled = false;
+      btnShaRetry.textContent = '重新尝试自动获取';
     }
   });
 
@@ -640,7 +731,6 @@ async function bootstrap() {
   function routeMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
 
-    // 游戏选择：未开局时响应
     if (msg.t === 'select') {
       if (!activeController) {
         log('对方选择了游戏：' + msg.game, 'sys');
@@ -649,7 +739,6 @@ async function bootstrap() {
       return;
     }
 
-    // 游戏内消息：只转发给当前游戏
     if (activeController) {
       try { activeController.handleMessage(msg); }
       catch (e) { log('游戏消息处理异常：' + e.message, 'err'); }
@@ -887,13 +976,11 @@ async function bootstrap() {
         peerB = createPeer('应答方');
         var pc = peerB.pc;
 
-        // 应答方绝不调用 createDataChannel，只通过 ondatachannel 接收。
         pc.ondatachannel = function (e) {
           log('应答方收到远端数据通道：label=' + e.channel.label, 'sys');
           bindDC(e.channel, '应答方', false);
         };
 
-        // 顺序不能反：先 setRemoteDescription(offer)，再 createAnswer。
         await pc.setRemoteDescription(new RTCSessionDescription(offerDesc));
         log('已设置远端描述（offer）', 'sys');
 
