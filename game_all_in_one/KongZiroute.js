@@ -4,8 +4,8 @@
   // 防止多次注册
   if (!window.GameRegistry) return;
 
-  window.GameRegistry.register('踏入孔府', {
-    name: '踏入孔府',
+  window.GameRegistry.register('fort-battle', {
+    name: 'Fort Battle',
     icon: '🧱',
     desc: '双人实时射击与搭建掩体，破坏对方护甲',
     create: function (api) {
@@ -39,11 +39,48 @@
       var remoteId = 1 - localId;
 
       var buildings = {}; // id -> {id,x,y,z,axis,type,aabb,hp}
-      var projectiles = {}; // id -> {id,owner,x,y,z,vx,vy,vz,life}
+      var projectiles = {}; // id -> {id,owner,x,y,z,vx,vy,vz,life,text}
       var seq = 0, fireCd = 0, buildCd = 0, netAcc = 0;
       var gameOver = false;
       var introActive = false;
       var introTimer = 0;
+
+      // 语录库
+      var sayTexts = ["腊肉", "礼乐", "朽木不可雕也", "Just Do IT!"];
+      var sayLoaded = false;
+
+      // 尝试拉取 says.txt
+      function loadSays() {
+        if (api.buildResourceUrl) {
+          var url = api.buildResourceUrl('says.txt');
+          var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+          var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 1000); // 1秒超时防卡死
+          
+          fetch(url, { signal: controller ? controller.signal : undefined })
+            .then(function (res) {
+              if (!res.ok) throw new Error('Network response was not ok');
+              return res.text();
+            })
+            .then(function (text) {
+              clearTimeout(timeoutId);
+              var lines = text.split('\n');
+              var parsed = [];
+              for (var i = 0; i < lines.length; i++) {
+                var match = lines[i].match(/"([^"]+)"/);
+                if (match) parsed.push(match[1]);
+              }
+              if (parsed.length > 0) {
+                sayTexts = parsed;
+                sayLoaded = true;
+                api.log('成功加载 ' + parsed.length + ' 条语录', 'sys');
+              }
+            })
+            .catch(function (err) {
+              clearTimeout(timeoutId);
+              api.log('says.txt 加载失败，使用默认语录: ' + err.message, 'err');
+            });
+        }
+      }
 
       // 剧情状态
       var storyTexts = api.isHost ? [
@@ -64,7 +101,7 @@
       var storyTimeoutId = 0;
       var storyAnimating = false;
 
-      // 隐藏调试功能状态（连续按空格跳过等待）
+      // 隐藏调试功能状态
       var spacePressCount = 0;
       var spaceTimer = 0;
 
@@ -73,12 +110,11 @@
       var actBtn = { fire: false, build: false, jump: false };
       var lookPointer = { id: -1, x: 0, y: 0 };
       
-      // 玩家状态（脚底中心）
+      // 玩家状态
       var me = { id: localId, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, yaw: 0, pitch: 0, hp: CFG.MAX_HP, onGround: true };
       var foe = { id: remoteId, x: 0, y: 0, z: 0, yaw: 0, hp: CFG.MAX_HP };
       var foeNet = { x: 0, y: 0, z: 0, yaw: 0 };
 
-      // 注入的 DOM 引用
       var dom = {};
 
       // ================= 数学与几何工具 =================
@@ -240,26 +276,25 @@
 
         if (storyIdx < storyTexts.length) {
           storyAnimating = true;
-          if (dom.storyText) dom.storyText.style.opacity = '0'; // 淡出当前文字
+          if (dom.storyText) dom.storyText.style.opacity = '0';
           
           clearTimeout(storyTimeoutId);
           storyTimeoutId = setTimeout(function () {
             if (!mounted) return;
             if (dom.storyText) {
               dom.storyText.textContent = storyTexts[storyIdx];
-              dom.storyText.style.opacity = '1'; // 淡入新文字
+              dom.storyText.style.opacity = '1';
             }
             storyIdx++;
             storyAnimating = false;
             
-            // 如果所有剧情已播完
             if (storyIdx >= storyTexts.length) {
               localStoryReady = true;
               if (dom.storyHint) dom.storyHint.style.display = 'none';
               checkStorySync();
               api.send({ t: 'fort:story:ready' });
             }
-          }, 500); // 500ms 与 CSS transition 对应
+          }, 500);
         }
       }
 
@@ -403,10 +438,18 @@
         var dz = -Math.cos(me.yaw) * cp;
         var ox = me.x + dx * 0.55, oy = me.y + CFG.EYE + dy * 0.55, oz = me.z + dz * 0.55;
         var id = localId + '_' + (++seq);
+        
+        var text = "";
+        if (localId === 0) {
+          text = sayTexts[Math.floor(Math.random() * sayTexts.length)];
+        }
+
         projectiles[id] = { id: id, owner: localId, x: ox, y: oy, z: oz,
-          vx: dx * CFG.PROJ_SPD, vy: dy * CFG.PROJ_SPD, vz: dz * CFG.PROJ_SPD, life: CFG.PROJ_LIFE };
+          vx: dx * CFG.PROJ_SPD, vy: dy * CFG.PROJ_SPD, vz: dz * CFG.PROJ_SPD, 
+          life: CFG.PROJ_LIFE, text: text };
+          
         api.send({ t: 'fort:shot', id: id, x: ox, y: oy, z: oz,
-          vx: dx * CFG.PROJ_SPD, vy: dy * CFG.PROJ_SPD, vz: dz * CFG.PROJ_SPD });
+          vx: dx * CFG.PROJ_SPD, vy: dy * CFG.PROJ_SPD, vz: dz * CFG.PROJ_SPD, text: text });
       }
 
       function tryBuild() {
@@ -682,7 +725,7 @@
           ctx.fill();
         }
 
-        // 画边框和网格
+        // 画网格
         function drawLine3D(p1, p2) {
           var a = camSpace(p1, cam), b = camSpace(p2, cam);
           var s = clipLineNear(a, b, NEAR);
@@ -702,7 +745,7 @@
         var edges = [[[-h, 0.02, -h], [h, 0.02, -h]], [[h, 0.02, -h], [h, 0.02, h]], [[h, 0.02, h], [-h, 0.02, h]], [[-h, 0.02, h], [-h, 0.02, -h]]];
         for (var i = 0; i < edges.length; i++) drawLine3D(edges[i][0], edges[i][1]);
 
-        // 收集所有面
+        // 收集 3D 面（主机子弹不参与，由 2D 层渲染）
         var faces = [];
         for (var id in buildings) {
           var a = buildings[id].aabb;
@@ -715,6 +758,8 @@
 
         for (var pid in projectiles) {
           var p = projectiles[pid];
+          if (p.owner === 0) continue; // 主机子弹用 Billboard 文字渲染，跳过 3D 几何
+
           var dl = Math.sqrt(p.vx*p.vx + p.vy*p.vy + p.vz*p.vz);
           if (dl > 1e-6) {
             var dz = [p.vx/dl, p.vy/dl, p.vz/dl], ref = Math.abs(dz[1]) > 0.99 ? [1,0,0] : [0,1,0];
@@ -746,7 +791,7 @@
           var face = faces[i];
           var vx = cam.pos[0] - face.center[0], vy = cam.pos[1] - face.center[1], vz = cam.pos[2] - face.center[2];
           var d = vx*face.normal[0] + vy*face.normal[1] + vz*face.normal[2];
-          if (d <= 0) continue; // 剔除背面
+          if (d <= 0) continue;
 
           var v0 = face.verts[0], v1 = face.verts[1], v2 = face.verts[2], v3 = face.verts[3];
           var ftris = [[v0, v1, v2], [v0, v2, v3]];
@@ -761,10 +806,38 @@
               if (j === 0) ctx.moveTo(s[0], s[1]); else ctx.lineTo(s[0], s[1]);
             }
             ctx.closePath();
-            ctx.fillStyle = '#33ff55'; // 调试模式绿色
+            ctx.fillStyle = '#33ff55';
             ctx.fill();
             ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 1; ctx.stroke();
           }
+        }
+
+        // ===== 渲染主机的 Billboard 文字子弹 =====
+        for (var pid in projectiles) {
+          var p = projectiles[pid];
+          if (p.owner !== 0 || !p.text) continue;
+          
+          var cs = camSpace([p.x, p.y, p.z], cam);
+          if (cs[2] < NEAR) continue;
+          
+          var screenP = proj(cs, focal, W, H);
+          // 透视缩放
+          var scale = focal / cs[2];
+          var baseFontSize = 14; 
+          var fontSize = baseFontSize * scale * 0.15; 
+          
+          if (fontSize < 6) continue; // 太远不渲染
+          
+          ctx.save();
+          ctx.font = 'bold ' + fontSize.toFixed(1) + 'px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.lineWidth = Math.max(1, fontSize * 0.15);
+          ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+          ctx.strokeText(p.text, screenP[0], screenP[1]);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(p.text, screenP[0], screenP[1]);
+          ctx.restore();
         }
       }
 
@@ -773,7 +846,7 @@
         if (!mounted) return;
         rafId = requestAnimationFrame(tick);
         
-        if (!gameStarted) return; // 剧情期间不更新游戏帧，保持黑屏
+        if (!gameStarted) return;
 
         if (!lastTime) lastTime = now;
         var dt = Math.min((now - lastTime) / 1000, 0.05);
@@ -802,7 +875,6 @@
       function onKeyDown(e) {
         var k = (e.key || '').toLowerCase();
 
-        // 隐藏调试功能：在等待对方完成剧情时，连续按 10 次空格跳过等待
         if (k === ' ' && localStoryReady && !peerStoryReady && !gameStarted) {
           e.preventDefault();
           if (spaceTimer) clearTimeout(spaceTimer);
@@ -914,7 +986,8 @@
           mounted = true;
           stage = container;
           
-          // 注入样式
+          loadSays(); // 尝试拉取文本资源
+
           var style = document.createElement('style');
           style.innerHTML = `
             .fb-hud{position:absolute;inset:0;pointer-events:none;font-family:system-ui,sans-serif;overflow:hidden;color:#dff3e0;display:none;}
@@ -962,7 +1035,6 @@
           `;
           document.head.appendChild(style);
 
-          // 注入 DOM
           container.innerHTML = `
             <canvas id="fbCanvas" style="display:block;width:100%;height:100%;outline:none;touch-action:none;background:#0a1410;"></canvas>
             
@@ -1035,14 +1107,12 @@
 
           dom.storyOverlay.addEventListener('pointerdown', onStoryClick);
           
-          // 初始化第一段剧情
           if (dom.storyText) {
             dom.storyText.textContent = storyTexts[0];
             storyIdx = 1;
             setTimeout(function(){ if (dom.storyText) dom.storyText.style.opacity = '1'; }, 50);
           }
 
-          // 绑定事件
           canvas.addEventListener('pointerdown', onCanvasPointerDown);
           canvas.addEventListener('pointermove', onCanvasPointerMove);
           canvas.addEventListener('pointerup', onCanvasPointerUp);
@@ -1118,7 +1188,11 @@
                 if (!gameStarted || typeof msg.id !== 'string' || projectiles[msg.id]) return;
                 if (!isFinite(msg.x) || !isFinite(msg.y) || !isFinite(msg.z)) return;
                 if (!isFinite(msg.vx) || !isFinite(msg.vy) || !isFinite(msg.vz)) return;
-                projectiles[msg.id] = { id: msg.id, owner: remoteId, x: msg.x, y: msg.y, z: msg.z, vx: msg.vx, vy: msg.vy, vz: msg.vz, life: CFG.PROJ_LIFE };
+                projectiles[msg.id] = { 
+                  id: msg.id, owner: remoteId, x: msg.x, y: msg.y, z: msg.z, 
+                  vx: msg.vx, vy: msg.vy, vz: msg.vz, life: CFG.PROJ_LIFE,
+                  text: msg.text || "" // 接收对方的文本
+                };
                 break;
 
               case 'fort:hit':
