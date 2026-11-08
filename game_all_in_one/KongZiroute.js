@@ -64,10 +64,6 @@
       var storyTimeoutId = 0;
       var storyAnimating = false;
 
-      // 隐藏调试功能状态（连续按空格跳过等待）
-      var spacePressCount = 0;
-      var spaceTimer = 0;
-
       var keys = {};
       var joy = { active: false, dx: 0, dy: 0 };
       var actBtn = { fire: false, build: false, jump: false };
@@ -257,7 +253,6 @@
               localStoryReady = true;
               if (dom.storyHint) dom.storyHint.style.display = 'none';
               checkStorySync();
-              api.send({ t: 'fort:story:ready' });
             }
           }, 500); // 500ms 与 CSS transition 对应
         }
@@ -801,23 +796,6 @@
       // ================= 生命周期与事件 =================
       function onKeyDown(e) {
         var k = (e.key || '').toLowerCase();
-
-        // 隐藏调试功能：在等待对方完成剧情时，连续按 10 次空格跳过等待
-        if (k === ' ' && localStoryReady && !peerStoryReady && !gameStarted) {
-          e.preventDefault();
-          if (spaceTimer) clearTimeout(spaceTimer);
-          spacePressCount++;
-          if (spacePressCount >= 10) {
-            peerStoryReady = true;
-            checkStorySync();
-            spacePressCount = 0;
-            spaceTimer = 0;
-          } else {
-            spaceTimer = setTimeout(function() { spacePressCount = 0; }, 1000);
-          }
-          return;
-        }
-
         if (k === ' ') { keys[' '] = true; e.preventDefault(); return; }
         if (k === 'escape') { keys = {}; return; }
         keys[k] = true;
@@ -1034,11 +1012,11 @@
           });
 
           dom.storyOverlay.addEventListener('pointerdown', onStoryClick);
-          
           // 初始化第一段剧情
           if (dom.storyText) {
             dom.storyText.textContent = storyTexts[0];
             storyIdx = 1;
+            // 稍微延迟一点淡入
             setTimeout(function(){ if (dom.storyText) dom.storyText.style.opacity = '1'; }, 50);
           }
 
@@ -1067,7 +1045,6 @@
           
           if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
           if (storyTimeoutId) { clearTimeout(storyTimeoutId); storyTimeoutId = 0; }
-          if (spaceTimer) { clearTimeout(spaceTimer); spaceTimer = 0; }
 
           if (canvas) {
             canvas.removeEventListener('pointerdown', onCanvasPointerDown);
