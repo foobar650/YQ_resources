@@ -5,6 +5,6 @@
  */
 window.GAMES_MANIFEST = [
   { id: 'pong',       file: 'pong.js' },
-  { id: 'battleship', file: 'battleship.js' }
-  { id: 'gomoku', file: 'gomoku.js' }
+  { id: 'battleship', file: 'battleship.js' },
+  { id: 'gomoku', file: 'gomoku.js' },
 ];
