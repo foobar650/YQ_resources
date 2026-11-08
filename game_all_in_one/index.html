@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>WebRTC 手动信令 · 跨设备 P2P 游戏</title>
 <style>
   :root { color-scheme: dark; }
@@ -12,6 +12,9 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     font-size: 14px; line-height: 1.6;
   }
+  /* 全屏游戏时禁止页面滚动 */
+  body.game-fullscreen { overflow: hidden; }
+
   .wrap { max-width: 880px; margin: 0 auto; }
   .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
   .topbar h1 { font-size: 17px; margin: 0; font-weight: 600; color: #e6edf3; }
@@ -78,38 +81,119 @@
   .game-card-name { font-size: 15px; font-weight: 600; }
   .game-card-desc { font-size: 12px; color: #8b949e; font-weight: 400; }
 
-  .game-panel { display: none; flex-direction: column; gap: 12px; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 14px; }
-  .game-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-  .game-title { font-size: 15px; font-weight: 600; color: #e6edf3; }
+  /* ============================================================
+   * 全屏游戏覆盖层
+   *   - #gameShell 固定全屏，盖住整页
+   *   - .game-top / .game-foot 绝对定位叠加在画面上，渐变背景
+   *   - #gameBody 绝对填满，flex 居中承载 canvas 与游戏面板
+   * ============================================================ */
+  .game-panel {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: #0d1117;
+    flex-direction: column;
+  }
+
+  .game-top {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    background: linear-gradient(to bottom,
+      rgba(13,17,23,0.94) 0%,
+      rgba(13,17,23,0.55) 65%,
+      rgba(13,17,23,0) 100%);
+    pointer-events: none;
+  }
+  .game-top > * { pointer-events: auto; }
+
+  .game-title {
+    font-size: 15px; font-weight: 600; color: #e6edf3;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.75);
+  }
   .game-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
   .role {
-    font-size: 12px; padding: 3px 12px; border-radius: 999px; background: #21262d; color: #8b949e; white-space: nowrap;
+    font-size: 12px; padding: 3px 12px; border-radius: 999px; background: rgba(33,38,45,0.85); color: #8b949e; white-space: nowrap;
+    backdrop-filter: blur(4px);
   }
-  .role.host  { background: #0d2340; color: #58a6ff; border: 1px solid #1f6feb; }
-  .role.guest { background: #0f2f16; color: #3fb950; border: 1px solid #2ea043; }
+  .role.host  { background: rgba(13,35,64,0.85); color: #58a6ff; border: 1px solid #1f6feb; }
+  .role.guest { background: rgba(15,47,22,0.85); color: #3fb950; border: 1px solid #2ea043; }
   .role.turn  { background: #1f6feb; color: #fff; border: 1px solid #388bfd; }
-  .role.wait  { background: #3d2e0a; color: #d29922; border: 1px solid #bb8009; }
-  .role.over  { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+  .role.wait  { background: rgba(61,46,10,0.85); color: #d29922; border: 1px solid #bb8009; }
+  .role.over  { background: rgba(33,38,45,0.85); color: #8b949e; border: 1px solid #30363d; }
 
-  .game-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: #8b949e; }
+  .game-foot {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    z-index: 20;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: #8b949e;
+    background: linear-gradient(to top,
+      rgba(13,17,23,0.94) 0%,
+      rgba(13,17,23,0.55) 65%,
+      rgba(13,17,23,0) 100%);
+    pointer-events: none;
+  }
+  .game-foot > * { pointer-events: auto; text-shadow: 0 1px 2px rgba(0,0,0,0.65); }
+
+  #gameBody {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 60px 16px 52px;
+    box-sizing: border-box;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  /* 画面：等比缩放，不超容器 */
+  #gameBody canvas {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    flex: 0 1 auto;
+    min-height: 0;
+    border: none;
+    border-radius: 0;
+    background: #0d1117;
+  }
+
+  /* 海战棋控制面板在全屏下居中显示 */
+  #gameBody .bs-subpanel {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: 720px;
+  }
 
   .game-canvas {
-    display: block; width: 100%; height: auto; background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
-    touch-action: none; user-select: none; -webkit-user-select: none;
+    display: block;
+    background: #0d1117;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
   }
-  .pong-canvas { aspect-ratio: 8 / 5; cursor: crosshair; }
-  .bs-canvas   { aspect-ratio: 800 / 820; cursor: pointer; }
-
-  .bs-subpanel { display: none; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 14px; }
-  .bs-subpanel h3 { margin: 0 0 8px; font-size: 14px; color: #58a6ff; font-weight: 600; }
-  .bs-subpanel p { margin: 0 0 8px; }
-  .bs-config-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: #8b949e; flex-wrap: wrap; }
-  .bs-input {
-    width: 68px; background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 5px;
-    padding: 5px 8px; font-size: 13px; font-family: inherit;
-  }
-  .bs-input:focus { outline: none; border-color: #58a6ff; }
+  .pong-canvas { cursor: crosshair; }
+  .bs-canvas   { cursor: pointer; }
 
   #shaInput {
     width: 100%; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
@@ -198,7 +282,7 @@
     <div id="gameGrid" class="game-grid"></div>
   </section>
 
-  <!-- 游戏外壳 -->
+  <!-- 全屏游戏外壳：控件叠加在画面上 -->
   <section id="gameShell" class="game-panel">
     <div class="game-top">
       <span class="game-title" id="gameTitle">—</span>
@@ -221,7 +305,7 @@
   'use strict';
 
   /* ============================================================
-   * 配置：改仓库/分支只动这里
+   * 配置
    * ============================================================ */
   var REPO_OWNER  = 'foobar650';
   var REPO_NAME   = 'YQ_resources';
@@ -319,13 +403,14 @@
   };
 
   /* ============================================================
-   * 视图切换
+   * 视图切换（全屏游戏覆盖时给 body 加/移除 game-fullscreen）
    * ============================================================ */
   function showGameSelect() {
     shaPanel.style.display = 'none';
     signalArea.style.display = 'none';
     gameShell.style.display = 'none';
     gameSelectArea.style.display = 'block';
+    document.body.classList.remove('game-fullscreen');
     setBadge(true);
   }
   function showGameShell() {
@@ -333,12 +418,14 @@
     signalArea.style.display = 'none';
     gameSelectArea.style.display = 'none';
     gameShell.style.display = 'flex';
+    document.body.classList.add('game-fullscreen');
     setBadge(true);
   }
   function backToSignal() {
     gameShell.style.display = 'none';
     gameSelectArea.style.display = 'none';
     signalArea.style.display = '';
+    document.body.classList.remove('game-fullscreen');
     setBadge(false);
   }
 
@@ -357,26 +444,19 @@
   }
 
   /* ============================================================
-   * SHA 管理：localStorage 读写
+   * SHA 管理
    * ============================================================ */
   function getSavedSha() {
     try {
       var v = localStorage.getItem(LS_SHA_KEY);
       if (v && /^[a-f0-9]{40}$/i.test(v)) return v.toLowerCase();
-    } catch (e) { /* localStorage 不可用时静默失败 */ }
+    } catch (e) { /* 忽略 */ }
     return null;
   }
-
   function saveSha(sha) {
-    try {
-      localStorage.setItem(LS_SHA_KEY, sha);
-      return true;
-    } catch (e) {
-      log('保存 SHA 到 localStorage 失败：' + e.message, 'err');
-      return false;
-    }
+    try { localStorage.setItem(LS_SHA_KEY, sha); return true; }
+    catch (e) { log('保存 SHA 到 localStorage 失败：' + e.message, 'err'); return false; }
   }
-
   function clearSavedSha() {
     try { localStorage.removeItem(LS_SHA_KEY); } catch (e) { /* 忽略 */ }
   }
@@ -384,7 +464,6 @@
   function showShaPanel(mode, currentSha, message) {
     shaPanel.style.display = 'block';
     shaError.textContent = '';
-
     shaStatus.className = '';
     if (mode === 'stale-local') {
       shaStatus.classList.add('stale');
@@ -395,23 +474,18 @@
     } else {
       shaStatus.textContent = message || '请输入最新的 40 位 commit SHA。';
     }
-
     shaInput.value = currentSha || '';
     if (currentSha) shaInput.select();
     shaInput.focus();
   }
-
-  function hideShaPanel() {
-    shaPanel.style.display = 'none';
-  }
+  function hideShaPanel() { shaPanel.style.display = 'none'; }
 
   /* ============================================================
-   * 从 GitHub API 获取最新 commit SHA
+   * 获取最新 commit SHA
    * ============================================================ */
   function getLatestCommitSha() {
     var apiUrl = 'https://api.github.com/repos/'
       + REPO_OWNER + '/' + REPO_NAME + '/commits/' + REPO_BRANCH;
-
     return fetch(apiUrl, {
       headers: { 'Accept': 'application/vnd.github.v3+json' }
     }).then(function (res) {
@@ -419,11 +493,8 @@
       return res.json();
     }).then(function (data) {
       var commit = null;
-      if (Array.isArray(data)) {
-        commit = data[0];
-      } else if (data && data.sha) {
-        commit = data;
-      }
+      if (Array.isArray(data)) commit = data[0];
+      else if (data && data.sha) commit = data;
       var sha = commit && commit.sha;
       if (!sha || !/^[a-f0-9]{40}$/i.test(sha)) {
         console.warn('[SHA] 无法解析，实际响应结构：', data);
@@ -434,7 +505,7 @@
   }
 
   /* ============================================================
-   * 按指定 SHA 加载所有脚本
+   * 按 SHA 加载全部脚本
    * ============================================================ */
   async function loadAllScripts(sha) {
     var CDN_BASE = 'https://cdn.jsdmirror.com/gh/'
@@ -448,14 +519,12 @@
       renderGameCards();
       return false;
     }
-
     var manifest = window.GAMES_MANIFEST || [];
     if (!manifest.length) {
       log('games-list.js 中未定义 GAMES_MANIFEST', 'err');
       renderGameCards();
       return false;
     }
-
     var allOk = true;
     for (var i = 0; i < manifest.length; i++) {
       var item = manifest[i];
@@ -471,13 +540,12 @@
         allOk = false;
       }
     }
-
     renderGameCards();
     return allOk;
   }
 
   /* ============================================================
-   * 启动流程
+   * 启动
    * ============================================================ */
   async function bootstrap() {
     var saved = getSavedSha();
@@ -545,7 +613,6 @@
       shaError.textContent = 'SHA 必须是 40 位十六进制字符（0-9、a-f）';
       return;
     }
-
     shaError.textContent = '';
     saveSha(v);
     log('已保存 SHA：' + v.slice(0, 7) + '…，开始加载脚本…', 'sys');
@@ -603,10 +670,7 @@
   });
 
   shaInput.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      btnShaSave.click();
-    }
+    if (e.key === 'Enter') { e.preventDefault(); btnShaSave.click(); }
   });
 
   /* ============================================================
@@ -718,24 +782,16 @@
   }
 
   /* ============================================================
-   * 退出当前游戏，回到选择界面
-   *   notifyPeer=true 时通过数据通道通知对方一起退出
+   * 退出当前游戏
    * ============================================================ */
   function leaveGame(notifyPeer) {
     if (!activeController) return;
-
     if (notifyPeer && dc && dc.readyState === 'open') {
-      try { dc.send(JSON.stringify({ t: 'leave-game' })); }
-      catch (e) { /* 忽略 */ }
+      try { dc.send(JSON.stringify({ t: 'leave-game' })); } catch (e) { /* 忽略 */ }
     }
-
     stopGame();
-
-    if (dc && dc.readyState === 'open') {
-      showGameSelect();
-    } else {
-      backToSignal();
-    }
+    if (dc && dc.readyState === 'open') showGameSelect();
+    else backToSignal();
   }
 
   /* ============================================================
@@ -744,7 +800,6 @@
   function routeMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
 
-    // 对方在游戏界面点击「返回选择」
     if (msg.t === 'leave-game') {
       if (activeController) {
         log('对方已退出游戏，返回游戏选择界面', 'sys');
@@ -753,7 +808,6 @@
       return;
     }
 
-    // 游戏选择：未开局时响应
     if (msg.t === 'select') {
       if (!activeController) {
         log('对方选择了游戏：' + msg.game, 'sys');
@@ -762,7 +816,6 @@
       return;
     }
 
-    // 游戏内消息：只转发给当前游戏
     if (activeController) {
       try { activeController.handleMessage(msg); }
       catch (e) { log('游戏消息处理异常：' + e.message, 'err'); }
@@ -770,7 +823,7 @@
   }
 
   /* ============================================================
-   * 数据通道绑定
+   * 数据通道
    * ============================================================ */
   function bindDC(channel, tag, isHost) {
     dc = channel;
@@ -802,7 +855,7 @@
   }
 
   /* ============================================================
-   * 等待 ICE 收集完成
+   * 等待 ICE
    * ============================================================ */
   function waitIceComplete(pc, timeoutMs) {
     timeoutMs = timeoutMs || 12000;
@@ -836,7 +889,7 @@
   }
 
   /* ============================================================
-   * 创建 PeerConnection
+   * PeerConnection
    * ============================================================ */
   function createPeer(tag) {
     var info = { tag: tag, pc: null, total: 0, cand: { host: 0, srflx: 0, prflx: 0, relay: 0 } };
@@ -900,7 +953,7 @@
   }
 
   /* ============================================================
-   * 复制到剪贴板
+   * 复制
    * ============================================================ */
   function copyToClipboard(text, btn, label) {
     if (!text) { log('没有可复制的内容，请先生成 SDP', 'err'); return; }
@@ -1005,6 +1058,7 @@
           bindDC(e.channel, '应答方', false);
         };
 
+        // 顺序不能反：先 setRemoteDescription(offer)，再 createAnswer。
         await pc.setRemoteDescription(new RTCSessionDescription(offerDesc));
         log('已设置远端描述（offer）', 'sys');
 
@@ -1054,12 +1108,10 @@
    * ============================================================ */
   btnBackToSelect.addEventListener('click', function () {
     if (!activeController) return;
-
     var ok = window.confirm(
       '确定要返回游戏选择界面吗？\n当前对局将被放弃，对方也会一起返回选择界面。'
     );
     if (!ok) return;
-
     log('用户主动返回游戏选择界面', 'sys');
     leaveGame(true);
   });
@@ -1093,7 +1145,6 @@
   gameSelectArea.style.display = 'none';
   gameShell.style.display = 'none';
   log('页面已就绪。信令流程：① 发起方生成 Offer → ② 应答方粘贴 Offer 生成 Answer → ③ 发起方粘贴 Answer 完成连接。', 'sys');
-  log('你知道吗:可以在语雀运行HTML网络测试中的PeerJS P2P connect程序用于第一次交换SHA/WebRTC数据,只需要打28个字符!', 'recv');
   log('连接建立后进入游戏选择界面，任一方选择游戏，双方自动加入。', 'sys');
   bootstrap();
 })();
