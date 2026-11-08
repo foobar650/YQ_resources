@@ -44,7 +44,7 @@
       var introActive = false;
       var introTimer = 0;
 
-      // 内联的经典语录（当副机子弹击中时作为主机子弹的文字展示）
+      // 内联的经典语录
       var sayTexts = [
         "朽木不可雕也，粪土之墙不可污也，于予与何诛？",
         "非吾徒也。小子鸣鼓而攻之，可也。",
@@ -251,7 +251,6 @@
         return faces;
       }
 
-      // 通用仿射纹理映射
       function drawAffineTriangle(ctx, img, src, dst) {
         var x0 = src[0][0], y0 = src[0][1];
         var x1 = src[1][0], y1 = src[1][1];
@@ -282,7 +281,21 @@
 
       // ================= 剧情控制 =================
       function showNextStory() {
-        if (storyFinished || storyAnimating || gameStarted) return;
+        if (storyAnimating || gameStarted || localStoryReady) return;
+
+        // 如果剧情已经全部播完，再次点击则进入等待/开始逻辑
+        if (storyFinished) {
+          localStoryReady = true;
+          if (dom.storyText) {
+            dom.storyText.textContent = '等待对方完成剧情...';
+            dom.storyText.style.opacity = '1';
+          }
+          if (dom.storyHint) dom.storyHint.style.display = 'none';
+          
+          checkStorySync();
+          api.send({ t: 'fort:story:ready' });
+          return;
+        }
 
         if (storyIdx < storyTexts.length) {
           storyAnimating = true;
@@ -303,11 +316,6 @@
               if (dom.storyHint) dom.storyHint.textContent = '点击屏幕继续';
             }
           }, 500);
-        } else {
-          localStoryReady = true;
-          if (dom.storyHint) dom.storyHint.style.display = 'none';
-          checkStorySync();
-          api.send({ t: 'fort:story:ready' });
         }
       }
 
@@ -316,7 +324,10 @@
           if (dom.storyOverlay) dom.storyOverlay.style.display = 'none';
           startRealGame();
         } else if (localStoryReady && !peerStoryReady) {
-          if (dom.storyText) dom.storyText.textContent = '等待对方完成剧情...';
+          if (dom.storyText) {
+            dom.storyText.textContent = '等待对方完成剧情...';
+            dom.storyText.style.opacity = '1';
+          }
           if (dom.storyHint) dom.storyHint.style.display = 'none';
         }
       }
@@ -718,7 +729,6 @@
         var NEAR = CFG.NEAR;
         var h = CFG.HALF;
 
-        // 画地面：按 10x10 分块贴图，避免严重的透视扭曲
         if (images.map) {
           var step = 10;
           for (var gx = -h; gx < h; gx += step) {
@@ -745,7 +755,6 @@
             }
           }
         } else {
-          // 没图时纯色兜底
           var tris = [
             [[-h, 0, -h], [h, 0, -h], [h, 0, h]],
             [[-h, 0, -h], [h, 0, h], [-h, 0, h]]
@@ -766,7 +775,6 @@
           }
         }
 
-        // 收集 3D 面
         var faces = [];
         for (var id in buildings) {
           var a = buildings[id].aabb;
@@ -792,7 +800,7 @@
               var pf = boxFaces([p.x, p.y, p.z], 0.15, 0.15, 0.5, [xx,xy,xz], [yx,yy,yz], dz);
               for (var i = 0; i < pf.length; i++) {
                 pf[i].depth = distSq(pf[i].center, cam.pos); 
-                pf[i].texture = 'larou'; // 设置副机子弹贴图
+                pf[i].texture = 'larou';
                 faces.push(pf[i]);
               }
             }
@@ -808,9 +816,8 @@
           [c[0]+right[0], c[1]+1, c[2]+right[2]], [c[0]-right[0], c[1]+1, c[2]-right[2]]
         ], normal: facing, center: c }];
         
-        // 设置对手贴图：主机看副机(wantong)，副机看主机(kongzi)
         ff[0].texture = (localId === 0) ? 'wantong' : 'kongzi';
-        ff[0].uvs = [[0,1], [1,1], [1,0], [0,0]]; // 修正人物贴图方向
+        ff[0].uvs = [[0,1], [1,1], [1,0], [0,0]];
         
         for (var i = 0; i < ff.length; i++) { 
           ff[i].depth = distSq(ff[i].center, cam.pos); 
@@ -828,7 +835,6 @@
           var v0 = face.verts[0], v1 = face.verts[1], v2 = face.verts[2], v3 = face.verts[3];
           var c0 = camSpace(v0, cam), c1 = camSpace(v1, cam), c2 = camSpace(v2, cam), c3 = camSpace(v3, cam);
           
-          // 如果贴近相机且被裁剪，降级为纯色
           if (c0[2] < NEAR || c1[2] < NEAR || c2[2] < NEAR || c3[2] < NEAR) {
             var clipped = clipPolyNear([c0, c1, c2, c3], NEAR);
             if (clipped.length < 3) continue;
@@ -879,7 +885,6 @@
           }
         }
 
-        // 渲染主机的 Billboard 文字子弹
         for (var pid in projectiles) {
           var p = projectiles[pid];
           if (p.owner !== 0 || !p.text) continue;
@@ -1050,7 +1055,6 @@
           mounted = true;
           stage = container;
 
-          // 加载贴图
           var baseDir = '';
           if (api.buildResourceUrl) {
             var testUrl = api.buildResourceUrl('test');
