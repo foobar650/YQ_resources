@@ -104,6 +104,12 @@
     padding: 5px 8px; font-size: 13px; font-family: inherit;
   }
   .bs-input:focus { outline: none; border-color: #58a6ff; }
+
+  #shaInput {
+    width: 100%; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+    padding: 9px 12px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; margin: 8px 0;
+  }
+  #shaInput:focus { outline: none; border-color: #58a6ff; }
 </style>
 </head>
 <body>
@@ -113,6 +119,19 @@
     <h1>WebRTC 手动信令 · 跨设备 P2P 游戏</h1>
     <span id="statusBadge" class="badge off">未连接</span>
   </div>
+
+  <!-- ================= 手动 SHA 面板（自动获取失败时显示） ================= -->
+  <section id="shaPanel" class="card" style="display:none;">
+    <h2>手动输入 Commit SHA</h2>
+    <p class="hint">自动获取 SHA 失败（可能是网络或环境限制）。请输入最新的 40 位 commit SHA，脚本会基于它拼接 CDN 地址。</p>
+    <input id="shaInput" type="text" placeholder="例如：a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0">
+    <div class="row">
+      <button id="btnShaSave" type="button">保存并使用</button>
+      <button id="btnShaClear" class="danger" type="button">清除已保存的 SHA</button>
+    </div>
+    <p id="shaError" class="hint warn"></p>
+    <p class="hint">保存后 SHA 会写入浏览器 localStorage，下次打开页面会自动使用，不再请求 GitHub API。</p>
+  </section>
 
   <!-- 信令区 -->
   <div id="signalArea">
@@ -183,11 +202,11 @@
   /* ============================================================
    * 配置：改仓库/分支只动这里
    * ============================================================ */
-var REPO_OWNER = 'foobar650';
-var REPO_NAME  = 'YQ_resources';
-var REPO_BRANCH = 'master';
-var REPO_PATH   = 'game_all_in_one';
-  var CDN_BASE = 'https://cdn.jsdmirror.com/gh/foobar650/YQ_resources@master/game_all_in_one/';
+  var REPO_OWNER  = 'foobar650';
+  var REPO_NAME   = 'YQ_resources';
+  var REPO_BRANCH = 'master';
+  var REPO_PATH   = 'game_all_in_one';
+  var LS_SHA_KEY  = 'webrtc_game_sha';
 
   /* ============================================================
    * DOM
@@ -204,6 +223,12 @@ var REPO_PATH   = 'game_all_in_one';
   var gameBody     = document.getElementById('gameBody');
   var btnHangupSelect = document.getElementById('btnHangupSelect');
   var btnGameHangup   = document.getElementById('btnGameHangup');
+
+  var shaPanel    = document.getElementById('shaPanel');
+  var shaInput    = document.getElementById('shaInput');
+  var btnShaSave  = document.getElementById('btnShaSave');
+  var btnShaClear = document.getElementById('btnShaClear');
+  var shaError    = document.getElementById('shaError');
 
   var btnCreateOffer = document.getElementById('btnCreateOffer');
   var offerOut       = document.getElementById('offerOut');
@@ -258,7 +283,7 @@ var REPO_PATH   = 'game_all_in_one';
     order: [],
     register: function (id, def) {
       if (this.games[id]) return;
-      def.id=id;
+      def.id = id;
       this.games[id] = def;
       this.order.push(id);
     },
@@ -273,12 +298,14 @@ var REPO_PATH   = 'game_all_in_one';
    * 视图切换
    * ============================================================ */
   function showGameSelect() {
+    shaPanel.style.display = 'none';
     signalArea.style.display = 'none';
     gameShell.style.display = 'none';
     gameSelectArea.style.display = 'block';
     setBadge(true);
   }
   function showGameShell() {
+    shaPanel.style.display = 'none';
     signalArea.style.display = 'none';
     gameSelectArea.style.display = 'none';
     gameShell.style.display = 'flex';
@@ -305,70 +332,194 @@ var REPO_PATH   = 'game_all_in_one';
     });
   }
 
-function getLatestCommitSha() {
-  var apiUrl = 'https://api.github.com/repos/'
-    + REPO_OWNER + '/' + REPO_NAME + '/commits/' + REPO_BRANCH;
-
-  return fetch(apiUrl, {
-    headers: { 'Accept': 'application/vnd.github.v3+json' }
-  }).then(function (res) {
-    if (!res.ok) throw new Error('GitHub API 返回 ' + res.status);
-    return res.json();
-  }).then(function (data) {
-    var commit = null;
-    if (Array.isArray(data)) {
-      commit = data[0];
-    } else if (data && data.sha) {
-      commit = data;
-    }
-    var sha = commit && commit.sha;
-    if (!sha || !/^[a-f0-9]{40}$/.test(sha)) {
-      console.warn('[SHA] 无法解析，实际响应结构：', data);
-      throw new Error('无法从响应中解析 commit SHA');
-    }
-    return sha;
-  });
-}
-
-async function bootstrap() {
-  var sha;
-  try {
-    sha = await getLatestCommitSha();
-    log('获取最新 commit SHA：' + sha.slice(0, 7) + '…', 'sys');
-  } catch (e) {
-    log('获取 commit SHA 失败：' + e.message + '，回退到 @' + REPO_BRANCH, 'err');
-    sha = REPO_BRANCH;   // 降级：仍然能用，只是可能命中旧缓存
-  }
-
-  var CDN_BASE = 'https://cdn.jsdmirror.com/gh/'
-    + REPO_OWNER + '/' + REPO_NAME + '@' + sha + '/'
-    + REPO_PATH + '/';
-
-  try {
-    await loadScript(CDN_BASE + 'games-list.js');
-  } catch (e) {
-    log('加载 games-list.js 失败：' + e.message, 'err');
-    renderGameCards();
-    return;
-  }
-
-  var manifest = window.GAMES_MANIFEST || [];
-  for (var i = 0; i < manifest.length; i++) {
+  /* ============================================================
+   * SHA 管理：localStorage 读写
+   * ============================================================ */
+  function getSavedSha() {
     try {
-      await loadScript(CDN_BASE + manifest[i].file);
+      var v = localStorage.getItem(LS_SHA_KEY);
+      if (v && /^[a-f0-9]{40}$/i.test(v)) return v.toLowerCase();
+    } catch (e) { /* localStorage 不可用时静默失败 */ }
+    return null;
+  }
+
+  function saveSha(sha) {
+    try {
+      localStorage.setItem(LS_SHA_KEY, sha);
+      return true;
     } catch (e) {
-      log('加载游戏 ' + manifest[i].file + ' 失败：' + e.message, 'err');
+      log('保存 SHA 到 localStorage 失败：' + e.message, 'err');
+      return false;
     }
   }
-  renderGameCards();
-}
+
+  function clearSavedSha() {
+    try { localStorage.removeItem(LS_SHA_KEY); } catch (e) { /* 忽略 */ }
+  }
+
+  function showShaPanel() {
+    shaPanel.style.display = 'block';
+    shaError.textContent = '';
+    shaInput.focus();
+  }
+
+  function hideShaPanel() {
+    shaPanel.style.display = 'none';
+  }
+
+  /* ============================================================
+   * 从 GitHub API 获取最新 commit SHA
+   * ============================================================ */
+  function getLatestCommitSha() {
+    var apiUrl = 'https://api.github.com/repos/'
+      + REPO_OWNER + '/' + REPO_NAME + '/commits/' + REPO_BRANCH;
+
+    return fetch(apiUrl, {
+      headers: { 'Accept': 'application/vnd.github.v3+json' }
+    }).then(function (res) {
+      if (!res.ok) throw new Error('GitHub API 返回 ' + res.status);
+      return res.json();
+    }).then(function (data) {
+      var commit = null;
+      if (Array.isArray(data)) {
+        commit = data[0];
+      } else if (data && data.sha) {
+        commit = data;
+      }
+      var sha = commit && commit.sha;
+      if (!sha || !/^[a-f0-9]{40}$/i.test(sha)) {
+        console.warn('[SHA] 无法解析，实际响应结构：', data);
+        throw new Error('无法从响应中解析 commit SHA');
+      }
+      return sha.toLowerCase();
+    });
+  }
+
+  /* ============================================================
+   * 按指定 SHA 加载所有脚本
+   * 返回 true = 全部成功；false = 至少一个失败（面板应保持可见）
+   * ============================================================ */
+  async function loadAllScripts(sha) {
+    var CDN_BASE = 'https://cdn.jsdmirror.com/gh/'
+      + REPO_OWNER + '/' + REPO_NAME + '@' + sha + '/'
+      + REPO_PATH + '/';
+
+    try {
+      await loadScript(CDN_BASE + 'games-list.js');
+    } catch (e) {
+      log('加载 games-list.js 失败：' + e.message, 'err');
+      renderGameCards();
+      return false;
+    }
+
+    var manifest = window.GAMES_MANIFEST || [];
+    if (!manifest.length) {
+      log('games-list.js 中未定义 GAMES_MANIFEST', 'err');
+      renderGameCards();
+      return false;
+    }
+
+    var allOk = true;
+    for (var i = 0; i < manifest.length; i++) {
+      var item = manifest[i];
+      try {
+        await loadScript(CDN_BASE + item.file);
+      } catch (e) {
+        log('加载 ' + item.file + ' 失败：' + e.message, 'err');
+        allOk = false;
+        continue;
+      }
+      // loadScript 成功只代表文件下载成功；要检查游戏是否真的注册了
+      if (!window.GameRegistry || !window.GameRegistry.get(item.id)) {
+        log('游戏 ' + item.id + '（' + item.file + '）未能注册，脚本可能语法错误', 'err');
+        allOk = false;
+      }
+    }
+
+    renderGameCards();
+    return allOk;
+  }
+
+  /* ============================================================
+   * 启动流程
+   *   1. localStorage 有 SHA → 直接加载
+   *   2. 否则请求 GitHub API
+   *   3. API 也失败 → 显示手动输入面板
+   * ============================================================ */
+  async function bootstrap() {
+    // 第 1 步：尝试本地保存的 SHA
+    var saved = getSavedSha();
+    if (saved) {
+      log('使用本地保存的 SHA：' + saved.slice(0, 7) + '…', 'sys');
+      var okLocal = await loadAllScripts(saved);
+      if (okLocal) return;
+      log('本地 SHA 加载失败（可能是 CDN 未同步或 SHA 已失效），尝试自动获取最新 SHA…', 'err');
+    }
+
+    // 第 2 步：尝试 GitHub API
+    try {
+      var apiSha = await getLatestCommitSha();
+      log('获取最新 commit SHA：' + apiSha.slice(0, 7) + '…', 'sys');
+      var okApi = await loadAllScripts(apiSha);
+      if (okApi) return;
+      log('API 返回的 SHA 加载失败（CDN 可能未同步），请手动输入 SHA', 'err');
+    } catch (e) {
+      log('获取 commit SHA 失败：' + e.message, 'err');
+    }
+
+    // 第 3 步：显示手动输入面板
+    log('请手动输入 commit SHA 后继续。', 'sys');
+    showShaPanel();
+  }
+
+  /* ============================================================
+   * SHA 面板按钮事件
+   * ============================================================ */
+  btnShaSave.addEventListener('click', async function () {
+    var v = shaInput.value.trim().toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(v)) {
+      shaError.textContent = 'SHA 必须是 40 位十六进制字符（0-9、a-f）';
+      return;
+    }
+
+    shaError.textContent = '';
+    saveSha(v);
+    log('已保存 SHA：' + v.slice(0, 7) + '…，开始加载脚本…', 'sys');
+
+    var ok = await loadAllScripts(v);
+    if (ok) {
+      hideShaPanel();
+      log('所有游戏加载成功。', 'sys');
+    } else {
+      shaError.textContent = '加载失败：可能是 CDN 还没同步这个 commit，或 SHA 无效。请稍后重试或换一个 SHA。';
+      log('使用手动输入的 SHA 加载失败', 'err');
+    }
+  });
+
+  btnShaClear.addEventListener('click', function () {
+    clearSavedSha();
+    shaInput.value = '';
+    shaError.textContent = '';
+    log('已清除本地保存的 SHA（下次刷新会重新尝试自动获取）', 'sys');
+  });
+
+  shaInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      btnShaSave.click();
+    }
+  });
+
+  /* ============================================================
+   * 渲染游戏卡片
+   * ============================================================ */
   function renderGameCards() {
     gameGrid.innerHTML = '';
     var games = window.GameRegistry.list();
     if (!games.length) {
       var err = document.createElement('p');
       err.className = 'hint warn';
-      err.textContent = '没有加载到任何游戏，请检查 CDN 是否可访问。';
+      err.textContent = '没有加载到任何游戏，请检查 CDN 是否可访问，或手动输入有效的 SHA。';
       gameGrid.appendChild(err);
       return;
     }
