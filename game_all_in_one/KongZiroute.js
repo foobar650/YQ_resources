@@ -24,7 +24,7 @@
         LOOK_SENS_MOUSE: 0.0022,
         JOY_DEADZONE: 0.15,
         FOV_DEG: 75,
-        NEAR: 0.15, // 略微提高近平面，给大网格留点余量
+        NEAR: 0.15,
         INTRO_DURATION: 3.0
       };
       CFG.JUMP_V = Math.sqrt(2 * CFG.GRAVITY * CFG.JUMP_H);
@@ -90,7 +90,6 @@
       var storyAnimating = false;
       var storyFinished = false;
 
-      // 隐藏调试功能
       var spacePressCount = 0;
       var spaceTimer = 0;
 
@@ -215,17 +214,6 @@
         return out;
       }
 
-      function clipLineNear(a, b, near) {
-        var aIn = a[2] >= near, bIn = b[2] >= near;
-        if (!aIn && !bIn) return null;
-        if (aIn && bIn) return [a, b];
-        var dz = b[2] - a[2];
-        if (Math.abs(dz) < 1e-6) return null;
-        var t = (near - a[2]) / dz;
-        var p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, near];
-        return aIn ? [a, p] : [p, b];
-      }
-
       function boxFaces(center, hx, hy, hz, ax, ay, az) {
         var C = [];
         for (var i = 0; i < 8; i++) {
@@ -258,7 +246,6 @@
         return faces;
       }
 
-      // 仿射三角形映射（修复了图片像素坐标）
       function drawAffineTriangle(ctx, img, src, dst) {
         var x0 = src[0][0] * img.width, y0 = src[0][1] * img.height;
         var x1 = src[1][0] * img.width, y1 = src[1][1] * img.height;
@@ -288,7 +275,71 @@
         ctx.restore();
       }
 
-      // ================= 资源加载 =================
+      // ================= 资源加载（模仿 ClassIn 兼容逻辑） =================
+      function doLoadAssets() {
+        var baseUrl = CDN_BASE + currentSha + GAME_PATH;
+
+        // 使用 fetch 获取为 Blob，防止沙箱跨域限制
+        function fetchAsBlob(url) {
+          return fetch(url, { mode: 'cors', credentials: 'omit' })
+            .then(function (res) {
+              if (!res.ok) throw new Error('HTTP ' + res.status);
+              return res.blob();
+            });
+        }
+
+        function loadImgBlob(name, file) {
+          var url = baseUrl + file;
+          return fetchAsBlob(url)
+            .then(function (blob) {
+              var blobUrl = URL.createObjectURL(blob);
+              return new Promise(function (resolve, reject) {
+                var img = new Image();
+                img.onload = function () { images[name] = img; resolve(); };
+                img.onerror = function () { reject(new Error('Image decode error')); };
+                img.src = blobUrl;
+              });
+            })
+            .catch(function (err) {
+              if (currentSha !== FALLBACK_SHA) {
+                var fbUrl = CDN_BASE + FALLBACK_SHA + GAME_PATH + file;
+                return fetchAsBlob(fbUrl)
+                  .then(function (blob) {
+                    var blobUrl = URL.createObjectURL(blob);
+                    return new Promise(function (resolve, reject) {
+                      var img = new Image();
+                      img.onload = function () { images[name] = img; resolve(); };
+                      img.onerror = function () { reject(new Error('Image decode error')); };
+                      img.src = blobUrl;
+                    });
+                  });
+              }
+              throw err;
+            });
+        }
+
+        // 开始并发加载
+        loadImgBlob('kongzi', 'kongzi.jpg');
+        loadImgBlob('wantong', 'wantong.jpg');
+        loadImgBlob('map', 'map.webp');
+        loadImgBlob('larou', 'larou.jpg');
+        loadImgBlob('obstacle', 'obstacle.jpg');
+
+        // 尝试加载 says.txt
+        fetch(baseUrl + 'says.txt', { mode: 'cors', credentials: 'omit' })
+          .then(function (res) { return res.ok ? res.text() : ''; })
+          .then(function (text) {
+            if (!text) return;
+            var regex = /"([^"]+)"/g;
+            var match, parsed = [];
+            while ((match = regex.exec(text)) !== null) {
+              if (match[1] && match[1].trim()) parsed.push(match[1].trim());
+            }
+            if (parsed.length > 0) sayTexts = parsed;
+          })
+          .catch(function () {});
+      }
+
       function loadResources() {
         var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
         var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 2000);
@@ -314,46 +365,6 @@
         .finally(function () {
           doLoadAssets();
         });
-      }
-
-      function doLoadAssets() {
-        var baseUrl = CDN_BASE + currentSha + GAME_PATH;
-
-        function loadImg(name, file) {
-          var img = new Image();
-          img.crossOrigin = 'Anonymous';
-          img.onload = function () { images[name] = img; };
-          img.onerror = function () {
-            if (currentSha !== FALLBACK_SHA) {
-              img.src = CDN_BASE + FALLBACK_SHA + GAME_PATH + file;
-            }
-          };
-          img.src = baseUrl + file;
-        }
-
-        loadImg('kongzi', 'kongzi.jpg');
-        loadImg('wantong', 'wantong.jpg');
-        loadImg('map', 'map.webp');
-        loadImg('larou', 'larou.jpg');
-        loadImg('obstacle', 'obstacle.jpg'); // 新增障碍物贴图
-
-        // 尝试加载 says.txt
-        fetch(baseUrl + 'says.txt')
-          .then(res => res.text())
-          .then(text => {
-            var regex = /"([^"]+)"/g;
-            var match;
-            var parsed = [];
-            while ((match = regex.exec(text)) !== null) {
-              if (match[1] && match[1].trim()) parsed.push(match[1].trim());
-            }
-            if (parsed.length > 0) {
-              sayTexts = parsed;
-            }
-          })
-          .catch(() => {
-            // 忽略错误，使用内联的 sayTexts
-          });
       }
 
       // ================= 剧情控制 =================
@@ -797,7 +808,6 @@
         }
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-        // 纯色天空背景
         ctx.fillStyle = '#87CEEB';
         ctx.fillRect(0, 0, W, H);
 
@@ -807,11 +817,9 @@
         var h = CFG.HALF;
 
         if (images.map) {
-          // ★ 关键优化：step 改为 2，细分地面网格，极大减轻近处拉伸和透视变形
           var step = 2; 
           for (var gx = -h; gx < h; gx += step) {
             for (var gz = -h; gz < h; gz += step) {
-              // 快速视野剔除，如果距离太远直接跳过（保留视野内的网格）
               var dxc = gx + step/2 - me.x;
               var dzc = gz + step/2 - me.z;
               if (dxc*dxc + dzc*dzc > 2500) continue; 
@@ -826,7 +834,6 @@
               var clipped = clipPolyNear(poly, NEAR);
               if (clipped.length < 3) continue;
 
-              // ★ 处理被裁切的地块：现在小网格被裁切后面积很小，可以放心用相近色填充
               if (c1[2] < NEAR || c2[2] < NEAR || c3[2] < NEAR || c4[2] < NEAR) {
                 ctx.beginPath();
                 for (var j = 0; j < clipped.length; j++) {
@@ -834,7 +841,7 @@
                   if (j === 0) ctx.moveTo(s[0], s[1]); else ctx.lineTo(s[0], s[1]);
                 }
                 ctx.closePath();
-                ctx.fillStyle = '#7a7768'; // 取地图近似色，避免突兀
+                ctx.fillStyle = '#7a7768';
                 ctx.fill();
               } else {
                 var s1 = proj(c1, focal, W, H), s2 = proj(c2, focal, W, H);
@@ -881,7 +888,7 @@
             (a.maxx-a.minx)/2, (a.maxy-a.miny)/2, (a.maxz-a.minz)/2, [1,0,0], [0,1,0], [0,0,1]);
           for (var i = 0; i < bf.length; i++) {
             bf[i].depth = distSq(bf[i].center, cam.pos); 
-            bf[i].texture = 'obstacle'; // ★ 应用障碍物贴图
+            bf[i].texture = 'obstacle';
             faces.push(bf[i]);
           }
         }
