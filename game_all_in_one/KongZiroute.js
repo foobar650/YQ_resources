@@ -44,44 +44,56 @@
       var introActive = false;
       var introTimer = 0;
 
-      // 语录库（默认空）
-      var sayTexts = [];
+      // 语录库（如果文件读取失败，会使用这个兜底）
+      var sayTexts = ["礼乐", "腊肉"];
 
       // 尝试拉取 says.txt
       function loadSays() {
+        var url = 'says.txt';
+        
+        // 优先使用加载器提供的方法
         if (api.buildResourceUrl) {
-          var url = api.buildResourceUrl('says.txt');
-          var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-          var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 1000);
-          
-          fetch(url, { signal: controller ? controller.signal : undefined })
-            .then(function (res) {
-              if (!res.ok) throw new Error('Network response was not ok');
-              return res.text();
-            })
-            .then(function (text) {
-              clearTimeout(timeoutId);
-              // 全局匹配所有被双引号包围的文本
-              var regex = /"([^"]+)"/g;
-              var match;
-              var parsed = [];
-              while ((match = regex.exec(text)) !== null) {
-                if (match[1] && match[1].trim()) {
-                  parsed.push(match[1].trim());
-                }
-              }
-              
-              sayTexts = parsed;
-              api.log('成功加载 ' + parsed.length + ' 条语录', 'sys');
-              if (dom.storyHint && !gameStarted) {
-                // 如果还在等待界面，可以提醒一下加载完毕
-              }
-            })
-            .catch(function (err) {
-              clearTimeout(timeoutId);
-              api.log('says.txt 加载失败: ' + err.message, 'err');
-            });
+          url = api.buildResourceUrl('says.txt');
+        } else if (document.currentScript && document.currentScript.src) {
+          // 兜底：基于当前 JS 文件的 URL 推导相对路径
+          var scriptUrl = document.currentScript.src;
+          var baseDir = scriptUrl.substring(0, scriptUrl.lastIndexOf('/') + 1);
+          url = baseDir + 'says.txt';
         }
+
+        api.log('正在加载语录: ' + url, 'info');
+
+        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        var timeoutId = setTimeout(function () { if (controller) controller.abort(); }, 2000);
+        
+        fetch(url, { signal: controller ? controller.signal : undefined })
+          .then(function (res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.text();
+          })
+          .then(function (text) {
+            clearTimeout(timeoutId);
+            // 全局匹配所有被双引号包围的文本
+            var regex = /"([^"]+)"/g;
+            var match;
+            var parsed = [];
+            while ((match = regex.exec(text)) !== null) {
+              if (match[1] && match[1].trim()) {
+                parsed.push(match[1].trim());
+              }
+            }
+            
+            if (parsed.length > 0) {
+              sayTexts = parsed;
+              api.log('成功读取 ' + parsed.length + ' 条语录', 'sys');
+            } else {
+              api.log('says.txt 格式不正确或为空，使用默认语录', 'err');
+            }
+          })
+          .catch(function (err) {
+            clearTimeout(timeoutId);
+            api.log('says.txt 加载失败: ' + err.message + ' (将使用默认语录)', 'err');
+          });
       }
 
       // 剧情状态
@@ -441,6 +453,7 @@
         var id = localId + '_' + (++seq);
         
         var text = "";
+        // 只有主机（孔子）发射的子弹才携带语录
         if (localId === 0 && sayTexts.length > 0) {
           text = sayTexts[Math.floor(Math.random() * sayTexts.length)];
         }
@@ -759,7 +772,7 @@
 
         for (var pid in projectiles) {
           var p = projectiles[pid];
-          if (p.owner === 0) continue; // 主机子弹用 2D 文字
+          if (p.owner === 0) continue;
 
           var dl = Math.sqrt(p.vx*p.vx + p.vy*p.vy + p.vz*p.vz);
           if (dl > 1e-6) {
@@ -822,17 +835,17 @@
           if (cs[2] < NEAR) continue;
           
           var screenP = proj(cs, focal, W, H);
-          var scale = focal / cs[2];
           
-          // 调小字号，并相应微调距离系数
-          var fontSize = 10 * scale * 0.15;
-          if (fontSize < 5) continue;
+          // 字体大小限制在 8px 到 50px 之间，防止过近或过远导致异常
+          var baseFontSize = 14;
+          var screenFontSize = (baseFontSize * focal) / (cs[2] * 30);
+          screenFontSize = Math.max(8, Math.min(50, screenFontSize));
           
           ctx.save();
-          ctx.font = 'bold ' + fontSize.toFixed(1) + 'px sans-serif';
+          ctx.font = 'bold ' + screenFontSize.toFixed(1) + 'px sans-serif';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.lineWidth = Math.max(1, fontSize * 0.15);
+          ctx.lineWidth = Math.max(1, screenFontSize * 0.15);
           ctx.strokeStyle = 'rgba(0,0,0,0.8)';
           ctx.strokeText(p.text, screenP[0], screenP[1]);
           ctx.fillStyle = '#ffffff';
