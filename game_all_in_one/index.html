@@ -183,6 +183,10 @@
   /* ============================================================
    * 配置：改仓库/分支只动这里
    * ============================================================ */
+var REPO_OWNER = 'foobar650';
+var REPO_NAME  = 'YQ_resources';
+var REPO_BRANCH = 'master';
+var REPO_PATH   = 'game_all_in_one';
   var CDN_BASE = 'https://cdn.jsdmirror.com/gh/foobar650/YQ_resources@master/game_all_in_one/';
 
   /* ============================================================
@@ -300,26 +304,59 @@
       document.head.appendChild(s);
     });
   }
+function getLatestCommitSha() {
+  var apiUrl = 'https://api.github.com/repos/'
+    + REPO_OWNER + '/' + REPO_NAME + '/commits/' + REPO_BRANCH;
 
-  async function bootstrap() {
-    try {
-      await loadScript(CDN_BASE + 'games-list.js');
-    } catch (e) {
-      log('加载 games-list.js 失败：' + e.message, 'err');
-      renderGameCards();
-      return;
+  return fetch(apiUrl, {
+    headers: { 'Accept': 'application/vnd.github.v3+json' }
+  }).then(function (res) {
+    if (!res.ok) {
+      throw new Error('GitHub API 返回 ' + res.status);
     }
-    var manifest = window.GAMES_MANIFEST || [];
-    for (var i = 0; i < manifest.length; i++) {
-      try {
-        await loadScript(CDN_BASE + manifest[i].file);
-      } catch (e) {
-        log('加载游戏 ' + manifest[i].file + ' 失败：' + e.message, 'err');
-      }
+    return res.json();
+  }).then(function (data) {
+    // /commits/{branch} 返回的是数组，最新 commit 在索引 0
+    var sha = data && data[0] && data[0].sha;
+    if (!sha || !/^[a-f0-9]{40}$/.test(sha)) {
+      throw new Error('无法从响应中解析 commit SHA');
     }
-    renderGameCards();
+    return sha;
+  });
+}
+
+async function bootstrap() {
+  var sha;
+  try {
+    sha = await getLatestCommitSha();
+    log('获取最新 commit SHA：' + sha.slice(0, 7) + '…', 'sys');
+  } catch (e) {
+    log('获取 commit SHA 失败：' + e.message + '，回退到 @' + REPO_BRANCH, 'err');
+    sha = REPO_BRANCH;   // 降级：仍然能用，只是可能命中旧缓存
   }
 
+  var CDN_BASE = 'https://cdn.jsdmirror.com/gh/'
+    + REPO_OWNER + '/' + REPO_NAME + '@' + sha + '/'
+    + REPO_PATH + '/';
+
+  try {
+    await loadScript(CDN_BASE + 'games-list.js');
+  } catch (e) {
+    log('加载 games-list.js 失败：' + e.message, 'err');
+    renderGameCards();
+    return;
+  }
+
+  var manifest = window.GAMES_MANIFEST || [];
+  for (var i = 0; i < manifest.length; i++) {
+    try {
+      await loadScript(CDN_BASE + manifest[i].file);
+    } catch (e) {
+      log('加载游戏 ' + manifest[i].file + ' 失败：' + e.message, 'err');
+    }
+  }
+  renderGameCards();
+}
   function renderGameCards() {
     gameGrid.innerHTML = '';
     var games = window.GameRegistry.list();
