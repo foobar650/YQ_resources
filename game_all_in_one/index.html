@@ -304,6 +304,7 @@ var REPO_PATH   = 'game_all_in_one';
       document.head.appendChild(s);
     });
   }
+
 function getLatestCommitSha() {
   var apiUrl = 'https://api.github.com/repos/'
     + REPO_OWNER + '/' + REPO_NAME + '/commits/' + REPO_BRANCH;
@@ -311,14 +312,18 @@ function getLatestCommitSha() {
   return fetch(apiUrl, {
     headers: { 'Accept': 'application/vnd.github.v3+json' }
   }).then(function (res) {
-    if (!res.ok) {
-      throw new Error('GitHub API 返回 ' + res.status);
-    }
+    if (!res.ok) throw new Error('GitHub API 返回 ' + res.status);
     return res.json();
   }).then(function (data) {
-    // /commits/{branch} 返回的是数组，最新 commit 在索引 0
-    var sha = data && data[0] && data[0].sha;
+    var commit = null;
+    if (Array.isArray(data)) {
+      commit = data[0];
+    } else if (data && data.sha) {
+      commit = data;
+    }
+    var sha = commit && commit.sha;
     if (!sha || !/^[a-f0-9]{40}$/.test(sha)) {
+      console.warn('[SHA] 无法解析，实际响应结构：', data);
       throw new Error('无法从响应中解析 commit SHA');
     }
     return sha;
