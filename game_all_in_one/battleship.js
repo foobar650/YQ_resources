@@ -1,8 +1,8 @@
 /**
- * 海战棋模块（完整版）
+ * 海战棋模块
  * 依赖 window.GameRegistry（由 index.html 提供）
  *
- * 消息协议（index.html 只拦截 t === 'select'，其余全部转发给本模块）：
+ * 消息协议：
  *   bs:config   { ships:[{len,count}] }   主机广播舰队配置
  *   bs:ready    {}                         一方部署完成
  *   bs:start    { firstTurn:'host'|'guest' } 主机宣布开局与先手
@@ -22,8 +22,8 @@
   var GRID = BS_N * CELL;          // 280
   var CANVAS_W = 800;
   var CANVAS_H = 820;
-  var MY_X = 260, MY_Y = 70;       // 我的海域左上角
-  var EN_X = 260, EN_Y = 470;      // 敌方海域左上角
+  var MY_X = 260, MY_Y = 70;
+  var EN_X = 260, EN_Y = 470;
 
   window.GameRegistry.register('battleship', {
     name: '海战棋',
@@ -35,17 +35,21 @@
       var state = {
         phase: 'idle',          // idle | config | waitConfig | deploy | waitPeer | battle | over
         isHost: !!api.isHost,
-        config: [],             // [{len, count}]
+        config: [],
         myBoard: null,          // 10x10 { shipId, shot }
-        myShots: null,          // 10x10 null|'hit'|'miss'
-        myShips: [],            // [{id, len, cells:[{x,y}], hits}]
+        myShots: null,          // 10x10 null|'hit'|'miss'|'pending'
+        myShips: [],            // [{id, len, cells, hits}]
+        pendingShips: [],       // 部署阶段待放置的舰船长度队列（从大到小）
+        currentDir: 'h',        // 'h' 横向 | 'v' 纵向
         myTurn: false,
         deployed: false,
         peerReady: false,
         waitingResult: false,
         gameOver: false,
         iWon: false,
-        hoverCell: null
+        hoverCell: null,        // 鼠标所在敌方格子
+        hoverMy: null,          // 鼠标所在我方格子（部署预览用）
+        preview: null           // {cells, valid}
       };
 
       /* ---------- DOM / 画布 ---------- */
@@ -54,6 +58,8 @@
       var configPanel = null, waitConfigPanel = null, deployPanel = null, battlePanel = null;
       var shipRowsEl = null, configErrorEl = null, configSummaryEl = null;
       var turnInfoEl = null, resultInfoEl = null, confirmDeployBtn = null;
+      var dirBtn = null, undoBtn = null, clearBtn = null, pendingInfoEl = null;
+      var deployHintEl = null;
 
       /* ---------- 工具 ---------- */
       function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
@@ -79,11 +85,18 @@
       function formatConfig(cfg) {
         return cfg.map(function (s) { return s.len + '格×' + s.count; }).join('，');
       }
+      function formatPending() {
+        if (!state.pendingShips.length) return '全部放置完成';
+        return state.pendingShips.map(function (l) { return l + '格'; }).join(' · ');
+      }
       function countAliveShips() {
         return state.myShips.filter(function (s) { return s.hits < s.len; }).length;
       }
       function totalShipCells(cfg) {
         return cfg.reduce(function (acc, s) { return acc + s.len * s.count; }, 0);
+      }
+      function cellName(x, y) {
+        return String.fromCharCode(65 + x) + (y + 1);
       }
 
       /* ============================================================
@@ -110,7 +123,6 @@
         });
         configPanel.querySelector('.bs-confirm-config').addEventListener('click', onConfirmConfig);
 
-        // 默认配置
         addConfigRow(4, 1);
         addConfigRow(3, 2);
         addConfigRow(2, 3);
@@ -165,15 +177,27 @@
         deployPanel.className = 'bs-subpanel';
         deployPanel.innerHTML =
           '<p>舰队配置：<span class="bs-summary">—</span></p>' +
-          '<div class="row" style="margin-top:10px;">' +
+          '<p class="bs-pending" style="font-size:13px;color:#d29922;">—</p>' +
+          '<div class="row" style="margin-top:8px;">' +
+            '<button type="button" class="bs-dir">方向：横向</button>' +
+            '<button type="button" class="bs-undo" disabled>撤销</button>' +
+            '<button type="button" class="bs-clear" disabled>清空</button>' +
             '<button type="button" class="bs-random">随机部署</button>' +
             '<button type="button" class="bs-confirm-deploy" disabled>确认部署</button>' +
           '</div>' +
-          '<p class="hint bs-deploy-hint">点击「随机部署」生成阵型，满意后确认。</p>';
+          '<p class="hint bs-deploy-hint">点击左侧「我的海域」逐艘放置舰船；按 R 键或点「方向」切换横/竖。</p>';
 
         configSummaryEl = deployPanel.querySelector('.bs-summary');
+        pendingInfoEl = deployPanel.querySelector('.bs-pending');
+        dirBtn = deployPanel.querySelector('.bs-dir');
+        undoBtn = deployPanel.querySelector('.bs-undo');
+        clearBtn = deployPanel.querySelector('.bs-clear');
         confirmDeployBtn = deployPanel.querySelector('.bs-confirm-deploy');
+        deployHintEl = deployPanel.querySelector('.bs-deploy-hint');
 
+        dirBtn.addEventListener('click', toggleDirection);
+        undoBtn.addEventListener('click', onUndo);
+        clearBtn.addEventListener('click', onClear);
         deployPanel.querySelector('.bs-random').addEventListener('click', onRandomDeploy);
         confirmDeployBtn.addEventListener('click', onConfirmDeploy);
       }
@@ -216,13 +240,23 @@
         }
         configErrorEl.textContent = '';
         state.config = cfg;
-        state.phase = 'deploy';
 
-        // 主机把配置广播给客机
         api.send({ t: 'bs:config', ships: cfg });
         api.log('舰队配置已确认：' + formatConfig(cfg) + '，共 ' + totalShipCells(cfg) + ' 格', 'sys');
 
         enterDeploy();
+      }
+
+      /* ============================================================
+       * 部署阶段
+       * ============================================================ */
+      function buildPendingQueue() {
+        var lens = [];
+        state.config.forEach(function (s) {
+          for (var i = 0; i < s.count; i++) lens.push(s.len);
+        });
+        lens.sort(function (a, b) { return b - a; });
+        return lens;
       }
 
       function enterDeploy() {
@@ -230,36 +264,111 @@
         state.myBoard = createEmptyBoard();
         state.myShots = createEmptyShots();
         state.myShips = [];
+        state.pendingShips = buildPendingQueue();
+        state.currentDir = 'h';
         state.deployed = false;
         state.peerReady = false;
+        state.preview = null;
+        state.hoverMy = null;
 
         configSummaryEl.textContent = formatConfig(state.config);
-        confirmDeployBtn.disabled = true;
-        deployPanel.querySelector('.bs-deploy-hint').textContent =
-          '点击「随机部署」生成阵型，满意后确认。';
-
         showPanel('deploy');
+        updateDeployUI();
         api.setStatus('部署阶段', 'wait');
-        api.setHint('点击「随机部署」生成阵型，确认后等待对方。');
+        api.setHint('点击左侧「我的海域」逐艘放置舰船；按 R 键切换横/竖。');
         draw();
       }
 
-      /* ============================================================
-       * 随机部署
-       * ============================================================ */
-      function randomDeploy() {
-        var lens = [];
-        state.config.forEach(function (s) {
-          for (var i = 0; i < s.count; i++) lens.push(s.len);
-        });
-        lens.sort(function (a, b) { return b - a; });
+      function updateDeployUI() {
+        pendingInfoEl.textContent = '待放置：' + formatPending();
+        dirBtn.textContent = '方向：' + (state.currentDir === 'h' ? '横向' : '纵向');
+        undoBtn.disabled = state.myShips.length === 0;
+        clearBtn.disabled = state.myShips.length === 0;
+        var allPlaced = state.pendingShips.length === 0;
+        confirmDeployBtn.disabled = !allPlaced || state.deployed;
+        if (allPlaced && !state.deployed) {
+          deployHintEl.textContent = '全部舰船已放置，确认后等待对方。';
+        } else if (state.deployed) {
+          deployHintEl.textContent = '已确认，等待对方部署…';
+        } else {
+          deployHintEl.textContent = '点击左侧「我的海域」逐艘放置舰船；按 R 键切换横/竖。';
+        }
+      }
 
+      function toggleDirection() {
+        if (state.phase !== 'deploy') return;
+        state.currentDir = state.currentDir === 'h' ? 'v' : 'h';
+        updateDeployUI();
+        updateDeployPreview();
+        draw();
+      }
+
+      function updateDeployPreview() {
+        if (state.phase !== 'deploy' || !state.hoverMy || !state.pendingShips.length) {
+          state.preview = null;
+          return;
+        }
+        var x = state.hoverMy.x, y = state.hoverMy.y;
+        var len = state.pendingShips[0];
+        var cells = [];
+        var valid = true;
+        for (var i = 0; i < len; i++) {
+          var cx = state.currentDir === 'h' ? x + i : x;
+          var cy = state.currentDir === 'h' ? y : y + i;
+          if (cx >= BS_N || cy >= BS_N) { valid = false; continue; }
+          if (state.myBoard[cy][cx].shipId !== null) valid = false;
+          cells.push({ x: cx, y: cy });
+        }
+        state.preview = { cells: cells, valid: valid };
+      }
+
+      function tryPlaceShip(x, y) {
+        if (!state.pendingShips.length) return { ok: false, msg: '没有待放置的舰船' };
+        var len = state.pendingShips[0];
+        var cells = [];
+        for (var i = 0; i < len; i++) {
+          var cx = state.currentDir === 'h' ? x + i : x;
+          var cy = state.currentDir === 'h' ? y : y + i;
+          if (cx >= BS_N || cy >= BS_N) return { ok: false, msg: '超出边界，换个位置或切换方向' };
+          if (state.myBoard[cy][cx].shipId !== null) return { ok: false, msg: '与已有舰船重叠' };
+          cells.push({ x: cx, y: cy });
+        }
+        var id = state.myShips.length;
+        var ship = { id: id, len: len, cells: cells, hits: 0 };
+        cells.forEach(function (c) { state.myBoard[c.y][c.x].shipId = id; });
+        state.myShips.push(ship);
+        state.pendingShips.shift();
+        return { ok: true };
+      }
+
+      function onUndo() {
+        if (state.phase !== 'deploy' || !state.myShips.length) return;
+        var ship = state.myShips.pop();
+        ship.cells.forEach(function (c) { state.myBoard[c.y][c.x].shipId = null; });
+        state.pendingShips.unshift(ship.len);
+        updateDeployUI();
+        updateDeployPreview();
+        draw();
+      }
+
+      function onClear() {
+        if (state.phase !== 'deploy') return;
+        state.myBoard = createEmptyBoard();
+        state.myShips = [];
+        state.pendingShips = buildPendingQueue();
+        updateDeployUI();
+        updateDeployPreview();
+        draw();
+      }
+
+      function onRandomDeploy() {
+        if (state.phase !== 'deploy') return;
+        var lens = buildPendingQueue();
         for (var outer = 0; outer < 200; outer++) {
           var board = createEmptyBoard();
           var ships = [];
           var ok = true;
           var id = 0;
-
           for (var i = 0; i < lens.length && ok; i++) {
             var len = lens[i];
             var placed = false;
@@ -291,36 +400,29 @@
           if (ok) {
             state.myBoard = board;
             state.myShips = ships;
-            return true;
+            state.pendingShips = [];
+            updateDeployUI();
+            draw();
+            api.log('随机部署完成', 'sys');
+            return;
           }
         }
-        return false;
-      }
-
-      function onRandomDeploy() {
-        if (state.phase !== 'deploy') return;
-        var ok = randomDeploy();
-        if (!ok) {
-          api.log('随机部署失败，请调整舰队配置（可能是总格数过大导致放不下）', 'err');
-          return;
-        }
-        confirmDeployBtn.disabled = false;
-        deployPanel.querySelector('.bs-deploy-hint').textContent =
-          '阵型已生成，确认后进入对战。';
-        draw();
+        api.log('随机部署失败，请调整舰队配置（可能是总格数过大导致放不下）', 'err');
       }
 
       function onConfirmDeploy() {
         if (state.phase !== 'deploy' || state.deployed) return;
+        if (state.pendingShips.length) {
+          api.log('还有 ' + state.pendingShips.length + ' 艘舰船未放置', 'err');
+          return;
+        }
         state.deployed = true;
         state.phase = 'waitPeer';
-        confirmDeployBtn.disabled = true;
-        deployPanel.querySelector('.bs-deploy-hint').textContent = '已确认，等待对方部署…';
-
+        updateDeployUI();
         api.send({ t: 'bs:ready' });
         api.setStatus('等待对方部署', 'wait');
         api.log('本端部署完成，等待对方…', 'sys');
-
+        draw();
         maybeStartBattle();
       }
 
@@ -329,7 +431,6 @@
        * ============================================================ */
       function maybeStartBattle() {
         if (!state.deployed || !state.peerReady) return;
-        // 主机负责宣布开局
         if (state.isHost) {
           var firstTurn = Math.random() < 0.5 ? 'host' : 'guest';
           api.send({ t: 'bs:start', firstTurn: firstTurn });
@@ -342,6 +443,7 @@
         state.gameOver = false;
         state.iWon = false;
         state.waitingResult = false;
+        state.preview = null;
         state.myTurn =
           (state.isHost && firstTurn === 'host') ||
           (!state.isHost && firstTurn === 'guest');
@@ -376,10 +478,27 @@
        * 攻击 / 判定
        * ============================================================ */
       function onCanvasClick(e) {
+        if (!canvas) return;
+
+        if (state.phase === 'deploy') {
+          var my = hitTest(e, 'my');
+          if (!my) return;
+          var res = tryPlaceShip(my.x, my.y);
+          if (!res.ok) {
+            api.log('放置失败：' + res.msg, 'err');
+            deployHintEl.textContent = '放置失败：' + res.msg;
+          } else {
+            updateDeployUI();
+          }
+          updateDeployPreview();
+          draw();
+          return;
+        }
+
         if (state.phase !== 'battle' || state.gameOver) return;
         if (!state.myTurn || state.waitingResult) return;
 
-        var cell = hitTestEnemy(e);
+        var cell = hitTest(e, 'enemy');
         if (!cell) return;
         if (state.myShots[cell.y][cell.x] !== null) {
           resultInfoEl.textContent = '这个格子已经打过了，换一个。';
@@ -403,7 +522,6 @@
 
         var cell = state.myBoard[y][x];
         if (cell.shot !== null) {
-          // 重复攻击，理论上不该发生
           api.send({ t: 'bs:result', x: x, y: y, hit: cell.shot === 'hit', sunk: false, gameOver: false, nextTurn: false });
           return;
         }
@@ -426,7 +544,7 @@
 
         var allSunk = countAliveShips() === 0;
         var gameOver = allSunk;
-        var nextTurn = !hit;   // 未命中切换回合；命中则攻击方继续
+        var nextTurn = !hit;
 
         api.send({
           t: 'bs:result',
@@ -475,39 +593,54 @@
         draw();
       }
 
-      function cellName(x, y) {
-        return String.fromCharCode(65 + x) + (y + 1);
-      }
-
       /* ============================================================
        * 命中检测
        * ============================================================ */
-      function hitTestEnemy(e) {
+      function hitTest(e, which) {
         if (!canvas) return null;
         var rect = canvas.getBoundingClientRect();
         if (!rect.width || !rect.height) return null;
         var sx = (e.clientX - rect.left) / rect.width * CANVAS_W;
         var sy = (e.clientY - rect.top) / rect.height * CANVAS_H;
-        if (sx < EN_X || sx >= EN_X + GRID || sy < EN_Y || sy >= EN_Y + GRID) return null;
-        var cx = Math.floor((sx - EN_X) / CELL);
-        var cy = Math.floor((sy - EN_Y) / CELL);
+
+        var ox = which === 'my' ? MY_X : EN_X;
+        var oy = which === 'my' ? MY_Y : EN_Y;
+
+        if (sx < ox || sx >= ox + GRID || sy < oy || sy >= oy + GRID) return null;
+        var cx = Math.floor((sx - ox) / CELL);
+        var cy = Math.floor((sy - oy) / CELL);
         if (cx < 0 || cx >= BS_N || cy < 0 || cy >= BS_N) return null;
         return { x: cx, y: cy };
       }
 
       function onCanvasMove(e) {
         if (!canvas) return;
-        var cell = hitTestEnemy(e);
-        var changed = (cell && !state.hoverCell) ||
-                      (!cell && state.hoverCell) ||
-                      (cell && state.hoverCell && (cell.x !== state.hoverCell.x || cell.y !== state.hoverCell.y));
+
+        if (state.phase === 'deploy') {
+          var my = hitTest(e, 'my');
+          var changed = (my && !state.hoverMy) ||
+                        (!my && state.hoverMy) ||
+                        (my && state.hoverMy && (my.x !== state.hoverMy.x || my.y !== state.hoverMy.y));
+          state.hoverMy = my;
+          updateDeployPreview();
+          if (changed || state.preview) draw();
+          return;
+        }
+
+        if (state.phase !== 'battle') return;
+        var cell = hitTest(e, 'enemy');
+        var changed2 = (cell && !state.hoverCell) ||
+                       (!cell && state.hoverCell) ||
+                       (cell && state.hoverCell && (cell.x !== state.hoverCell.x || cell.y !== state.hoverCell.y));
         state.hoverCell = cell;
-        if (changed) draw();
+        if (changed2) draw();
       }
 
       function onCanvasLeave() {
-        if (state.hoverCell) {
+        if (state.hoverCell || state.hoverMy) {
           state.hoverCell = null;
+          state.hoverMy = null;
+          state.preview = null;
           draw();
         }
       }
@@ -545,7 +678,6 @@
                 ctx.fill();
               }
               if (cell.shot === 'hit') {
-                // 命中标记：白色 X
                 ctx.strokeStyle = '#ffffff';
                 ctx.lineWidth = 2;
                 ctx.beginPath();
@@ -557,37 +689,58 @@
           }
         }
 
+        // 部署预览
+        if (state.phase === 'deploy' && state.preview) {
+          var pv = state.preview;
+          for (var i = 0; i < pv.cells.length; i++) {
+            var c = pv.cells[i];
+            var ppx = MY_X + c.x * CELL;
+            var ppy = MY_Y + c.y * CELL;
+            if (pv.valid) {
+              ctx.fillStyle = 'rgba(63,185,80,0.45)';
+              ctx.fillRect(ppx + 2, ppy + 2, CELL - 4, CELL - 4);
+              ctx.strokeStyle = '#3fb950';
+            } else {
+              ctx.fillStyle = 'rgba(248,81,73,0.45)';
+              ctx.fillRect(ppx + 2, ppy + 2, CELL - 4, CELL - 4);
+              ctx.strokeStyle = '#f85149';
+            }
+            ctx.lineWidth = 2;
+            ctx.strokeRect(ppx + 2, ppy + 2, CELL - 4, CELL - 4);
+          }
+        }
+
         // 敌方海域
         if (state.myShots) {
           for (var yy = 0; yy < BS_N; yy++) {
             for (var xx = 0; xx < BS_N; xx++) {
               var s = state.myShots[yy][xx];
-              var ppx = EN_X + xx * CELL;
-              var ppy = EN_Y + yy * CELL;
+              var ppx2 = EN_X + xx * CELL;
+              var ppy2 = EN_Y + yy * CELL;
               if (s === 'hit') {
                 ctx.fillStyle = '#f85149';
-                ctx.fillRect(ppx + 2, ppy + 2, CELL - 4, CELL - 4);
+                ctx.fillRect(ppx2 + 2, ppy2 + 2, CELL - 4, CELL - 4);
                 ctx.strokeStyle = '#ffffff';
                 ctx.lineWidth = 2;
                 ctx.beginPath();
-                ctx.moveTo(ppx + 8, ppy + 8); ctx.lineTo(ppx + CELL - 8, ppy + CELL - 8);
-                ctx.moveTo(ppx + CELL - 8, ppy + 8); ctx.lineTo(ppx + 8, ppy + CELL - 8);
+                ctx.moveTo(ppx2 + 8, ppy2 + 8); ctx.lineTo(ppx2 + CELL - 8, ppy2 + CELL - 8);
+                ctx.moveTo(ppx2 + CELL - 8, ppy2 + 8); ctx.lineTo(ppx2 + 8, ppy2 + CELL - 8);
                 ctx.stroke();
               } else if (s === 'miss') {
                 ctx.fillStyle = '#8b949e';
                 ctx.beginPath();
-                ctx.arc(ppx + CELL / 2, ppy + CELL / 2, 5, 0, Math.PI * 2);
+                ctx.arc(ppx2 + CELL / 2, ppy2 + CELL / 2, 5, 0, Math.PI * 2);
                 ctx.fill();
               } else if (s === 'pending') {
                 ctx.strokeStyle = '#d29922';
                 ctx.lineWidth = 2;
-                ctx.strokeRect(ppx + 4, ppy + 4, CELL - 8, CELL - 8);
+                ctx.strokeRect(ppx2 + 4, ppy2 + 4, CELL - 8, CELL - 8);
               }
             }
           }
         }
 
-        // 悬停高亮
+        // 对战悬停高亮
         if (state.hoverCell && state.phase === 'battle' && state.myTurn && !state.waitingResult && !state.gameOver) {
           var h = state.hoverCell;
           if (state.myShots[h.y][h.x] === null) {
@@ -597,7 +750,6 @@
           }
         }
 
-        // 坐标标签
         drawCoords(MY_X, MY_Y);
         drawCoords(EN_X, EN_Y);
       }
@@ -643,6 +795,17 @@
       }
 
       /* ============================================================
+       * 键盘：R 键切换方向
+       * ============================================================ */
+      function onKeyDown(e) {
+        if (state.phase !== 'deploy') return;
+        if (e.key === 'r' || e.key === 'R') {
+          e.preventDefault();
+          toggleDirection();
+        }
+      }
+
+      /* ============================================================
        * 消息处理
        * ============================================================ */
       function handleMessage(msg) {
@@ -669,9 +832,7 @@
 
         if (msg.t === 'bs:start') {
           if (state.phase === 'waitPeer' || state.phase === 'deploy') {
-            // 客机收到 start 后进入对战
             if (!state.deployed) {
-              // 还没确认部署就收到 start，忽略（理论上不会发生）
               api.log('收到开局消息但本端尚未部署，忽略', 'err');
               return;
             }
@@ -695,17 +856,15 @@
        * 生命周期
        * ============================================================ */
       function mount(bodyEl) {
-        // 创建画布
         canvas = document.createElement('canvas');
         canvas.className = 'game-canvas bs-canvas';
-        canvas.width = CANVAS_W * (window.devicePixelRatio || 1);
-        canvas.height = CANVAS_H * (window.devicePixelRatio || 1);
-        ctx = canvas.getContext('2d');
         var dpr = window.devicePixelRatio || 1;
+        canvas.width = CANVAS_W * dpr;
+        canvas.height = CANVAS_H * dpr;
+        ctx = canvas.getContext('2d');
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         bodyEl.appendChild(canvas);
 
-        // 创建面板
         var panelHost = document.createElement('div');
         bodyEl.appendChild(panelHost);
         panelRoot = panelHost;
@@ -720,15 +879,15 @@
         panelHost.appendChild(deployPanel);
         panelHost.appendChild(battlePanel);
 
-        // 事件
         canvas.addEventListener('click', onCanvasClick);
         canvas.addEventListener('mousemove', onCanvasMove);
         canvas.addEventListener('mouseleave', onCanvasLeave);
+        window.addEventListener('keydown', onKeyDown);
 
-        // 初始化状态
         state.myBoard = createEmptyBoard();
         state.myShots = createEmptyShots();
         state.myShips = [];
+        state.pendingShips = [];
         state.gameOver = false;
 
         if (state.isHost) {
@@ -752,12 +911,14 @@
           canvas.removeEventListener('mousemove', onCanvasMove);
           canvas.removeEventListener('mouseleave', onCanvasLeave);
         }
+        window.removeEventListener('keydown', onKeyDown);
         canvas = null;
         ctx = null;
         panelRoot = null;
         configPanel = waitConfigPanel = deployPanel = battlePanel = null;
         shipRowsEl = configErrorEl = configSummaryEl = null;
         turnInfoEl = resultInfoEl = confirmDeployBtn = null;
+        dirBtn = undoBtn = clearBtn = pendingInfoEl = deployHintEl = null;
       }
 
       return {
